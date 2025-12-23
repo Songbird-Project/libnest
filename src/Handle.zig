@@ -4,7 +4,7 @@
 const curl = @import("curl");
 const std = @import("std");
 const linux = std.os.linux;
-const errors = @import("errors.zig");
+const errors = @import("error.zig");
 
 /// The libnest handle type
 // pub const NestHandle = struct {
@@ -63,8 +63,7 @@ pub fn init(alloc: std.mem.Allocator) !*@This() {
 }
 
 /// Destroy a nest handle instance and free it's memory
-pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
-    _ = alloc;
+pub fn deinit(self: *@This()) void {
     _ = curl.libcurl.curl_multi_cleanup(self.curlm);
     curl.libcurl.curl_global_cleanup();
 
