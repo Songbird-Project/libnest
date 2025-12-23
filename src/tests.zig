@@ -7,5 +7,5 @@ test "handle memory" {
     const alloc = std.testing.allocator;
 
     const hndl = try Handle.init(alloc);
-    hndl.deinit(alloc);
+    hndl.deinit();
 }
