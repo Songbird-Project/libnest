@@ -1,6 +1,5 @@
-//==================//
-//      Errors      //
-//==================//
+//! error.zig
+//! All libnest error types and functions
 
 /// Nest error values
 /// A "generic" error should never exist.
