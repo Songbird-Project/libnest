@@ -1,3 +1,4 @@
 # libnest
 
-The core of the Nest package manager, allowing no reliance on Pacman or libalpm.
+The core of the Nest package manager, based heavily on libalpm.
+
