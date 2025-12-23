@@ -2,8 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    const static_lib = b.option(bool, "emit-static", "Emit a statically linked library file");
-    const dynamic_lib = b.option(bool, "emit-dynamic", "Emit a dynamically linked library");
+    const emit_lib = b.option(bool, "emit-lib", "Emit a linked library file (use -Ddynamic for a dynamic library)");
+    const dynamic = b.option(bool, "dynamic", "Emit a dynamically linked library");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -45,32 +45,32 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     b.getInstallStep().dependOn(test_step);
 
-    if (static_lib != null and static_lib.?) {
-        const libnest_static = b.addLibrary(.{
-            .name = "nest",
-            .root_module = module,
-            .linkage = .static,
-        });
-        libnest_static.linkSystemLibrary("curl");
-        libnest_static.linkLibC();
+    if ((emit_lib != null and emit_lib.?) or (dynamic != null and dynamic.?)) {
+        var lib: ?*std.Build.Step.Compile = null;
 
-        b.installArtifact(libnest_static);
-    }
+        if (dynamic != null and dynamic.?) {
+            lib = b.addLibrary(.{
+                .name = "nest",
+                .root_module = module,
+                .linkage = .dynamic,
+                .version = .{
+                    .major = 0,
+                    .minor = 0,
+                    .patch = 0,
+                },
+            });
+        } else {
+            lib = b.addLibrary(.{
+                .name = "nest",
+                .root_module = module,
+                .linkage = .static,
+            });
+        }
 
-    if (dynamic_lib != null and dynamic_lib.?) {
-        const libnest_dynamic = b.addLibrary(.{
-            .name = "nest",
-            .root_module = module,
-            .linkage = .dynamic,
-            .version = .{
-                .major = 0,
-                .minor = 0,
-                .patch = 0,
-            },
-        });
-        libnest_dynamic.linkSystemLibrary("curl");
-        libnest_dynamic.linkLibC();
-
-        b.installArtifact(libnest_dynamic);
+        if (lib != null) {
+            lib.?.linkSystemLibrary("curl");
+            lib.?.linkLibC();
+            b.installArtifact(lib.?);
+        }
     }
 }
