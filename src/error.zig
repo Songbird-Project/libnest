@@ -81,6 +81,7 @@ pub fn nestErrString(err: NestError) []const u8 {
         .NEST_ERR_DB_NOT_FOUND => "unable to find database",
 
         //====== Server Errors (40-59) ======//
+        .NEST_ERR_SERVER_BAD_URL => "server url is not valid",
 
         //====== Handle Errors (60-79) ======//
         .NEST_ERR_HANDLE_NULL => "library not initialized",
