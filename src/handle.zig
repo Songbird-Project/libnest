@@ -114,3 +114,8 @@ pub fn unlock(alloc: std.mem.Allocator, handle: *NestHandle) !i8 {
 
     return 0;
 }
+
+pub fn canonicalizePath(path: []const u8) []const u8 {
+    if (path[path.len - 1] != '/') return path ++ '/';
+    return path;
+}
