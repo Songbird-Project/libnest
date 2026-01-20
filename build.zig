@@ -19,15 +19,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const curl = b.dependency("curl", .{ .link_vendor = false });
-    module.addImport("curl", curl.module("curl"));
-    module.addLibraryPath(.{
-        .dependency = .{
-            .dependency = curl,
-            .sub_path = "/usr/lib/",
-        },
-    });
-
     const tests = b.addTest(.{
         .root_module = b.addModule("tests", .{
             .root_source_file = b.path("src/tests.zig"),
@@ -35,9 +26,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    tests.linkSystemLibrary("curl");
-    tests.linkLibC();
-    tests.root_module.addImport("curl", curl.module("curl"));
 
     const run_tests = b.addRunArtifact(tests);
 
@@ -68,8 +56,6 @@ pub fn build(b: *std.Build) void {
         }
 
         if (lib != null) {
-            lib.?.linkSystemLibrary("curl");
-            lib.?.linkLibC();
             b.installArtifact(lib.?);
         }
     }

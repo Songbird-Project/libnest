@@ -1,6 +1,4 @@
-//! libnest is a package management library designed for Nest.
-
 const std = @import("std");
-const errors = @import("error.zig");
-const curl = @import("curl");
-const handle = @import("handle.zig");
+
+pub const Database = @import("core/Database.zig");
+pub const Package = @import("core/Package.zig");
