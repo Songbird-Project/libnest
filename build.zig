@@ -2,8 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    const emit_lib = b.option(bool, "emit-lib", "Emit a linked library file (use -Ddynamic for a dynamic library)");
-    const dynamic = b.option(bool, "dynamic", "Emit a dynamically linked library");
+    const emit_lib = b.option(bool, "emit-lib", "Emit a static library file (use -Ddynamic for a dynamic library)");
+    const dynamic = b.option(bool, "dynamic", "Emit a dynamic library");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -59,4 +59,10 @@ pub fn build(b: *std.Build) void {
             b.installArtifact(lib.?);
         }
     }
+
+    const sqlite = b.dependency("sqlite", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    module.addImport("sqlite", sqlite.module("sqlite"));
 }
