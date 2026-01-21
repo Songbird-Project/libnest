@@ -19,6 +19,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const sqlite = b.dependency("sqlite", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    module.addImport("sqlite", sqlite.module("sqlite"));
+
+    const curl = b.dependency("curl", .{ .link_vendor = false });
+    module.addImport("curl", curl.module("curl"));
+    module.addLibraryPath(.{
+        .dependency = .{
+            .dependency = curl,
+            .sub_path = "/usr/lib/",
+        },
+    });
+
     const tests = b.addTest(.{
         .root_module = b.addModule("tests", .{
             .root_source_file = b.path("src/tests.zig"),
@@ -26,6 +41,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+
+    tests.linkSystemLibrary("curl");
+    tests.linkLibC();
+    tests.root_module.addImport("curl", curl.module("curl"));
+    tests.root_module.addImport("sqlite", sqlite.module("sqlite"));
 
     const run_tests = b.addRunArtifact(tests);
 
@@ -43,7 +63,7 @@ pub fn build(b: *std.Build) void {
                 .linkage = .dynamic,
                 .version = .{
                     .major = 0,
-                    .minor = 0,
+                    .minor = 1,
                     .patch = 0,
                 },
             });
@@ -55,14 +75,10 @@ pub fn build(b: *std.Build) void {
             });
         }
 
-        if (lib != null) {
-            b.installArtifact(lib.?);
+        if (lib) |l| {
+            l.linkSystemLibrary("curl");
+            l.linkLibC();
+            b.installArtifact(l);
         }
     }
-
-    const sqlite = b.dependency("sqlite", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    module.addImport("sqlite", sqlite.module("sqlite"));
 }

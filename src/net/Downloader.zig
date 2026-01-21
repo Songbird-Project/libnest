@@ -1,19 +1,30 @@
 const std = @import("std");
+const curl = @import("curl");
 
 const Downloader = @This();
 
 alloc: std.mem.Allocator,
-client: *std.http.Client,
+client: *curl.Easy,
+ca_bundle: *std.array_list.Managed(u8),
 retry_limit: u8,
 retries: u8 = 0,
 
+const DownloadError = error{
+    TooManyRetries,
+};
+
 pub fn init(alloc: std.mem.Allocator, retries: u8) !Downloader {
-    const client = try alloc.create(std.http.Client);
-    client.* = std.http.Client{ .allocator = alloc };
+    // const client = try alloc.create(std.http.Client);
+    // client.* = std.http.Client{ .allocator = alloc };
+    const client = try alloc.create(curl.Easy);
+    const ca_bundle = try alloc.create(std.array_list.Managed(u8));
+    ca_bundle.* = try curl.allocCABundle(alloc);
+    client.* = try curl.Easy.init(.{ .ca_bundle = ca_bundle.* });
 
     return Downloader{
         .alloc = alloc,
         .client = client,
+        .ca_bundle = ca_bundle,
         .retry_limit = retries,
     };
 }
@@ -21,17 +32,17 @@ pub fn init(alloc: std.mem.Allocator, retries: u8) !Downloader {
 pub fn deinit(self: *Downloader) void {
     self.client.deinit();
     self.alloc.destroy(self.client);
+    self.ca_bundle.deinit();
+    self.alloc.destroy(self.ca_bundle);
 }
 
 pub fn download(
     self: *Downloader,
-    url: []const u8,
+    url: [:0]const u8,
     dest: []const u8,
+    download_cb: ?*const fn (downloaded: usize, total: usize) void,
 ) !void {
-    const uri = try std.Uri.parse(url);
-
-    var request = try self.client.request(.GET, uri, .{});
-    defer request.deinit();
+    var headers: curl.Easy.Headers = .{};
 
     const partial_exists: bool = exists: {
         std.fs.cwd().access(dest, .{}) catch |err| switch (err) {
@@ -52,66 +63,82 @@ pub fn download(
         }).stat()).size;
     };
 
-    const range = try std.fmt.allocPrint(
+    const range = try std.fmt.allocPrintSentinel(
         self.alloc,
-        "bytes={d}-",
+        "Range: bytes={d}-",
         .{partial_size},
+        0,
     );
     defer self.alloc.free(range);
 
-    if (partial_exists) {
-        const range_header = std.http.Header{
-            .name = "Range",
-            .value = range,
-        };
-        request.extra_headers = &[_]std.http.Header{range_header};
-    }
+    if (partial_exists) try headers.add(range);
+    try self.client.setUrl(url);
+    try self.client.setHeaders(headers);
+    try self.client.setMethod(.GET);
 
-    try request.sendBodiless();
-    var redirect_buffer: [1024]u8 = undefined;
-    var response = try request.receiveHead(&redirect_buffer);
+    var dl_writer: std.io.Writer.Allocating = .init(self.alloc);
+    defer dl_writer.deinit();
+    try self.client.setWriter(&dl_writer.writer);
 
-    if (std.mem.eql(u8, response.head.status.phrase().?, "Range Not Satisfiable")) {
-        var headers = response.head.iterateHeaders();
-        while (headers.next()) |header| {
-            if (std.mem.eql(u8, header.name, "Content-Range")) {
-                const range_delimiter = std.mem.indexOf(u8, header.value, "/");
-                const length = try std.fmt.parseInt(
-                    usize,
-                    header.value[range_delimiter.? + 1 ..],
-                    10,
-                );
-                if (partial_size == length) return;
-            }
+    const response = try self.client.perform();
+
+    if (response.status_code == 416) {
+        if (try response.getHeader("Content-Range")) |cr_header| {
+            const range_delimiter = std.mem.indexOf(u8, cr_header.get(), "/");
+            const length = try std.fmt.parseInt(
+                usize,
+                cr_header.get()[range_delimiter.? + 1 ..],
+                10,
+            );
+            if (partial_size == length) return;
         }
 
         if (self.retries == self.retry_limit) {
-            return;
+            return error.TooManyRetries;
         }
 
         try std.fs.cwd().deleteFile(dest);
-        self.retry_limit += 1;
+        self.retries += 1;
         const err = self.download(
             url,
             dest,
+            download_cb,
         );
         return err;
     }
 
-    const file: std.fs.File = try std.fs.cwd().createFile(
-        dest,
-        .{},
-    );
+    const file: std.fs.File = if (partial_exists)
+        try std.fs.cwd().openFile(
+            dest,
+            .{ .mode = .read_write },
+        )
+    else
+        try std.fs.cwd().createFile(
+            dest,
+            .{},
+        );
     defer file.close();
 
-    var transfer_buffer: [8192]u8 = undefined;
-    var response_reader = response.reader(&transfer_buffer);
-
-    var read_buffer: [8092]u8 = undefined;
-
-    while (true) {
-        const read_size = try response_reader.readSliceShort(&read_buffer);
-        try file.writeAll(read_buffer[0..read_size]);
-        if (read_size < read_buffer.len) break;
+    if (partial_exists) {
+        try file.seekTo(partial_size);
     }
+
+    // var downloaded: usize = partial_size;
+    // while (true) {
+    try file.writeAll(dl_writer.writer.buffered());
+    // downloaded = (try file.stat()).size;
+
+    // if (try response.getHeader("Content-Length")) |cl_header| {
+    //     if (download_cb) |cb| {
+    //         cb(
+    //             downloaded,
+    //             (try std.fmt.parseInt(
+    //                 usize,
+    //                 cl_header.get(),
+    //                 10,
+    //             )) + partial_size,
+    //         );
+    //     }
+    // }
+    // }
 }
