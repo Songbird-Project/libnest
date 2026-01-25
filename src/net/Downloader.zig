@@ -60,7 +60,10 @@ pub fn download(
     url: []const u8,
     dest: []const u8,
 ) !void {
+    self.client.reset();
+
     var headers: curl.Easy.Headers = .{};
+    defer headers.deinit();
 
     const partial_exists: bool = exists: {
         std.fs.cwd().access(dest, .{}) catch |err| switch (err) {
@@ -135,12 +138,15 @@ pub fn download(
     const response = try self.client.perform();
     if (self.cb_error) |err| return err;
 
+    if (response.status_code == 200 or response.status_code == 206)
+        self.retries = 0;
+
     if (response.status_code == 416) {
         if (try response.getHeader("Content-Range")) |cr_header| {
-            const range_delimiter = std.mem.indexOf(u8, cr_header.get(), "/");
+            const range_delim = std.mem.indexOfScalar(u8, cr_header.get(), '/');
             const length = try std.fmt.parseInt(
                 usize,
-                cr_header.get()[range_delimiter.? + 1 ..],
+                cr_header.get()[range_delim.? + 1 ..],
                 10,
             );
             if (partial_size == length) return;
