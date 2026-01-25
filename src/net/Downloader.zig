@@ -1,6 +1,17 @@
 const std = @import("std");
 const curl = @import("curl");
 
+fn write(ptr: [*c]c_char, size: c_uint, nmemb: c_uint, user_data: *anyopaque) callconv(.c) c_uint {
+    const real_size = size * nmemb;
+    const data = (@as([*]const u8, @ptrCast(ptr)))[0..real_size];
+    const file: *std.fs.File = @ptrCast(@alignCast(user_data));
+
+    file.writeAll(data) catch {
+        return 0; // Indicate an error
+    };
+    return @intCast(real_size);
+}
+
 const Downloader = @This();
 
 alloc: std.mem.Allocator,
@@ -8,14 +19,19 @@ client: *curl.Easy,
 ca_bundle: *std.array_list.Managed(u8),
 retry_limit: u8,
 retries: u8 = 0,
+cb_error: ?anyerror = null,
+cb_filled: ?u8 = null,
+download_cb: ?*const fn (downloaded: f64, total: f64) anyerror!void,
 
 const DownloadError = error{
     TooManyRetries,
 };
 
-pub fn init(alloc: std.mem.Allocator, retries: u8) !Downloader {
-    // const client = try alloc.create(std.http.Client);
-    // client.* = std.http.Client{ .allocator = alloc };
+pub fn init(
+    alloc: std.mem.Allocator,
+    retries: u8,
+    download_cb: ?*const fn (downloaded: f64, total: f64) anyerror!void,
+) !Downloader {
     const client = try alloc.create(curl.Easy);
     const ca_bundle = try alloc.create(std.array_list.Managed(u8));
     ca_bundle.* = try curl.allocCABundle(alloc);
@@ -26,6 +42,7 @@ pub fn init(alloc: std.mem.Allocator, retries: u8) !Downloader {
         .client = client,
         .ca_bundle = ca_bundle,
         .retry_limit = retries,
+        .download_cb = download_cb,
     };
 }
 
@@ -38,9 +55,8 @@ pub fn deinit(self: *Downloader) void {
 
 pub fn download(
     self: *Downloader,
-    url: [:0]const u8,
+    url: []const u8,
     dest: []const u8,
-    download_cb: ?*const fn (downloaded: usize, total: usize) void,
 ) !void {
     var headers: curl.Easy.Headers = .{};
 
@@ -71,16 +87,51 @@ pub fn download(
     );
     defer self.alloc.free(range);
 
-    if (partial_exists) try headers.add(range);
-    try self.client.setUrl(url);
-    try self.client.setHeaders(headers);
-    try self.client.setMethod(.GET);
+    var file: std.fs.File = if (partial_exists)
+        try std.fs.cwd().openFile(
+            dest,
+            .{ .mode = .read_write },
+        )
+    else
+        try std.fs.cwd().createFile(
+            dest,
+            .{},
+        );
+    defer file.close();
 
-    var dl_writer: std.io.Writer.Allocating = .init(self.alloc);
-    defer dl_writer.deinit();
-    try self.client.setWriter(&dl_writer.writer);
+    if (partial_exists) {
+        try file.seekTo(partial_size);
+    }
+
+    const usable_url = try self.alloc.dupeZ(u8, url);
+    defer self.alloc.free(usable_url);
+    try self.client.setUrl(usable_url);
+
+    if (partial_exists) try headers.add(range);
+    try self.client.setHeaders(headers);
+
+    try self.client.setMethod(.GET);
+    try curl.checkCode(curl.libcurl.curl_easy_setopt(
+        self.client.handle,
+        curl.libcurl.CURLOPT_XFERINFOFUNCTION,
+        Downloader.cb_wrapper,
+    ));
+    try curl.checkCode(curl.libcurl.curl_easy_setopt(
+        self.client.handle,
+        curl.libcurl.CURLOPT_XFERINFODATA,
+        self,
+    ));
+    try curl.checkCode(curl.libcurl.curl_easy_setopt(
+        self.client.handle,
+        curl.libcurl.CURLOPT_NOPROGRESS,
+        @as(c_long, 0),
+    ));
+
+    try self.client.setWritedata(&file);
+    try self.client.setWritefunction(Downloader.write);
 
     const response = try self.client.perform();
+    if (self.cb_error) |err| return err;
 
     if (response.status_code == 416) {
         if (try response.getHeader("Content-Range")) |cr_header| {
@@ -99,46 +150,33 @@ pub fn download(
 
         try std.fs.cwd().deleteFile(dest);
         self.retries += 1;
-        const err = self.download(
+        try self.download(
             url,
             dest,
-            download_cb,
         );
-        return err;
+    }
+}
+
+pub fn cb_wrapper(
+    clientp: *anyopaque,
+    c_dltotal: c_long,
+    c_dlnow: c_long,
+    _: c_long,
+    _: c_long,
+) callconv(.c) c_uint {
+    const dlnow: f64 = @floatFromInt(c_dlnow);
+    const dltotal: f64 = @floatFromInt(c_dltotal);
+
+    if (dltotal <= 0) return curl.libcurl.CURL_PROGRESSFUNC_CONTINUE;
+
+    const self: *Downloader = @ptrCast(@alignCast(clientp));
+
+    if (self.download_cb) |cb| {
+        cb(dlnow, dltotal) catch |err| {
+            self.cb_error = err;
+            return 1;
+        };
     }
 
-    const file: std.fs.File = if (partial_exists)
-        try std.fs.cwd().openFile(
-            dest,
-            .{ .mode = .read_write },
-        )
-    else
-        try std.fs.cwd().createFile(
-            dest,
-            .{},
-        );
-    defer file.close();
-
-    if (partial_exists) {
-        try file.seekTo(partial_size);
-    }
-
-    // var downloaded: usize = partial_size;
-    // while (true) {
-    try file.writeAll(dl_writer.writer.buffered());
-    // downloaded = (try file.stat()).size;
-
-    // if (try response.getHeader("Content-Length")) |cl_header| {
-    //     if (download_cb) |cb| {
-    //         cb(
-    //             downloaded,
-    //             (try std.fmt.parseInt(
-    //                 usize,
-    //                 cl_header.get(),
-    //                 10,
-    //             )) + partial_size,
-    //         );
-    //     }
-    // }
-    // }
+    return curl.libcurl.CURL_PROGRESSFUNC_CONTINUE;
 }
