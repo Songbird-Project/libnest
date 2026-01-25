@@ -50,17 +50,36 @@ pub fn deinit(self: *MirrorList) void {
     self.alloc.free(self.mirrors);
 }
 
-pub fn download(
+pub fn downloadPkg(
     self: MirrorList,
     pkg: Pkg,
     dest: []const u8,
-    download_cb: ?*const fn (downloaded: f64, total: f64) anyerror!void,
+    download_cb: ?*const Downloader.callback,
 ) !void {
     var dl: Downloader = try .init(self.alloc, 3, download_cb);
     defer dl.deinit();
 
     for (self.mirrors) |mirror| {
         const url = try self.fmtPkgURL(mirror, pkg);
+        defer self.alloc.free(url);
+
+        dl.download(url, dest) catch continue;
+        break;
+    }
+}
+
+pub fn downloadDb(
+    self: MirrorList,
+    name: []const u8,
+    arch: []const u8,
+    dest: []const u8,
+    download_cb: ?*const Downloader.callback,
+) !void {
+    var dl: Downloader = try .init(self.alloc, 3, download_cb);
+    defer dl.deinit();
+
+    for (self.mirrors) |mirror| {
+        const url = try self.fmtDbURL(mirror, name, arch);
         defer self.alloc.free(url);
 
         dl.download(url, dest) catch continue;
@@ -112,4 +131,51 @@ pub fn fmtPkgURL(
     );
 
     return pkg_url;
+}
+
+pub fn fmtDbURL(
+    self: MirrorList,
+    mirror: []const u8,
+    name: []const u8,
+    arch: []const u8,
+) ![]const u8 {
+    const repo_size = std.mem.replacementSize(
+        u8,
+        mirror,
+        "$repo",
+        name,
+    );
+    const repo_url = try self.alloc.alloc(u8, repo_size);
+    defer self.alloc.free(repo_url);
+    _ = std.mem.replace(
+        u8,
+        mirror,
+        "$repo",
+        name,
+        repo_url,
+    );
+
+    const arch_size = std.mem.replacementSize(
+        u8,
+        repo_url,
+        "$arch",
+        arch,
+    );
+    const url = try self.alloc.alloc(u8, arch_size);
+    defer self.alloc.free(url);
+    _ = std.mem.replace(
+        u8,
+        repo_url,
+        "$arch",
+        arch,
+        url,
+    );
+
+    const db_url = try Pkg.format(
+        self.alloc,
+        "{s}/{s}.db",
+        .{ url, name },
+    );
+
+    return db_url;
 }
