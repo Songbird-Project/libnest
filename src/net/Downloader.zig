@@ -12,6 +12,8 @@ fn write(ptr: [*c]c_char, size: c_uint, nmemb: c_uint, user_data: *anyopaque) ca
     return @intCast(real_size);
 }
 
+pub const callback = fn (f64, f64) anyerror!void;
+
 const Downloader = @This();
 
 alloc: std.mem.Allocator,
@@ -21,7 +23,7 @@ retry_limit: u8,
 retries: u8 = 0,
 cb_error: ?anyerror = null,
 cb_filled: ?u8 = null,
-download_cb: ?*const fn (downloaded: f64, total: f64) anyerror!void,
+download_cb: ?*const Downloader.callback,
 
 const DownloadError = error{
     TooManyRetries,
@@ -30,7 +32,7 @@ const DownloadError = error{
 pub fn init(
     alloc: std.mem.Allocator,
     retries: u8,
-    download_cb: ?*const fn (downloaded: f64, total: f64) anyerror!void,
+    download_cb: ?*const Downloader.callback,
 ) !Downloader {
     const client = try alloc.create(curl.Easy);
     const ca_bundle = try alloc.create(std.array_list.Managed(u8));
