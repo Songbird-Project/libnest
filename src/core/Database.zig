@@ -3,6 +3,7 @@ const sqlite = @import("sqlite");
 
 const Downloader = @import("../net/Downloader.zig");
 const MirrorList = @import("../net/MirrorList.zig");
+const Pkg = @import("Package.zig");
 
 const Db = @This();
 
@@ -22,14 +23,25 @@ pub fn init(alloc: std.mem.Allocator, path: [:0]const u8) !Db {
 
     try sqlite_db.exec(
         \\CREATE TABLE IF NOT EXISTS packages(
-        \\ id integer primary key autoincrement,
-        \\ repo text not null,
-        \\ name text not null,
-        \\ version text not null,
-        \\ description text,
-        \\ arch text,
-        \\ packager text,
-        \\ build_date integer
+        \\ id INTEGER PRIMARY KEY AUTOINCREMENT,
+        \\ name TEXT NOT NULL,
+        \\ repo TEXT NOT NULL,
+        \\ version TEXT NOT NULL,
+        \\ description TEXT,
+        \\ arch TEXT,
+        \\ license TEXT,
+        \\ packager TEXT,
+        \\ build_date INTEGER,
+        \\ checksum TEXT,
+        \\ signature TEXT,
+        \\ replaces TEXT,
+        \\ conflicts TEXT,
+        \\ provides TEXT,
+        \\ deps TEXT,
+        \\ mkdeps TEXT,
+        \\ optdeps TEXT,
+        \\ checkdeps TEXT,
+        \\ UNIQUE(name, repo)
         \\)
     , .{}, .{});
 
