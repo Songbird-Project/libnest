@@ -3,7 +3,6 @@ const sqlite = @import("sqlite");
 
 const Downloader = @import("../net/Downloader.zig");
 const MirrorList = @import("../net/MirrorList.zig");
-const Pkg = @import("Package.zig");
 
 const Db = @This();
 
