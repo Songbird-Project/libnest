@@ -5,6 +5,8 @@ const MirrorList = @import("net/MirrorList.zig");
 const Pkg = @import("core/Package.zig");
 const Db = @import("core/Database.zig");
 
+const desc = @import("parse/desc.zig");
+
 fn cb(dlnow: f64, dltotal: f64) !void {
     const bar_width: usize = 10;
     const filled: u8 = @min(bar_width, @as(u8, @intFromFloat((dlnow / dltotal) * 10)));
@@ -55,4 +57,17 @@ test "Sync Mirrors" {
         "x86_64",
         &cb,
     );
+
+    _ = try db.parseArchDb("./tests/core.arch.db");
+}
+
+test "DB Indexing" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var db = try Db.init(alloc, "./tests/core.db");
+    defer db.deinit();
+
+    try desc.index(alloc, &db, "./tests/desc", "core");
 }
