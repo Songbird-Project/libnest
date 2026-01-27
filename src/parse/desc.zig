@@ -21,6 +21,7 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, path: []const u8, repo: []const 
         \\ description,
         \\ arch,
         \\ license,
+        \\ filename,
         \\ packager,
         \\ build_date,
         \\ checksum,
@@ -32,12 +33,13 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, path: []const u8, repo: []const 
         \\ mkdeps,
         \\ optdeps,
         \\ checkdeps
-        \\) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        \\) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         \\ON CONFLICT(name, repo) DO UPDATE SET
         \\ version = excluded.version,
         \\ description = excluded.description,
         \\ arch = excluded.arch,
         \\ license = excluded.license,
+        \\ filename = excluded.filename,
         \\ packager = excluded.packager,
         \\ build_date = excluded.build_date,
         \\ checksum = excluded.checksum,
@@ -62,6 +64,7 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, path: []const u8, repo: []const 
         .description = fields.get("DESC") orelse unreachable,
         .arch = fields.get("ARCH") orelse unreachable,
         .license = fields.get("LICENSE") orelse unreachable,
+        .filename = fields.get("FILENAME") orelse unreachable,
         .packager = fields.get("PACKAGER") orelse unreachable,
         .build_date = try std.fmt.parseInt(i64, fields.get("BUILDDATE") orelse unreachable, 10),
         .checksum = fields.get("SHA256SUM") orelse unreachable,

@@ -29,6 +29,7 @@ pub fn init(alloc: std.mem.Allocator, path: [:0]const u8) !Db {
         \\ description TEXT,
         \\ arch TEXT,
         \\ license TEXT,
+        \\ filename TEXT,
         \\ packager TEXT,
         \\ build_date INTEGER,
         \\ checksum TEXT,
