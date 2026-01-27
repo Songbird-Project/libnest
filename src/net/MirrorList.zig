@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Downloader = @import("Downloader.zig");
 const Pkg = @import("../core/Package.zig");
+const Db = @import("../core/Database.zig");
 
 const MirrorList = @This();
 
@@ -52,15 +53,46 @@ pub fn deinit(self: *MirrorList) void {
 
 pub fn downloadPkg(
     self: MirrorList,
-    pkg: Pkg,
+    db: *Db,
+    name: []const u8,
+    repo: []const u8,
     dest: []const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
     var dl: Downloader = try .init(self.alloc, 3, download_cb);
     defer dl.deinit();
 
+    const filename_query =
+        \\SELECT filename FROM packages WHERE name=? and repo=?
+    ;
+    var filename_stmt = try db.sqlite_db.prepare(filename_query);
+    defer filename_stmt.deinit();
+
+    const filename = try filename_stmt.oneAlloc([]const u8, self.alloc, .{}, .{
+        .name = name,
+        .repo = repo,
+    });
+    defer if (filename) |f| self.alloc.free(f);
+
+    const arch_query =
+        \\SELECT arch FROM packages WHERE name=? and repo=?
+    ;
+    var arch_stmt = try db.sqlite_db.prepare(arch_query);
+    defer arch_stmt.deinit();
+
+    const arch = try arch_stmt.oneAlloc([]const u8, self.alloc, .{}, .{
+        .name = name,
+        .repo = repo,
+    });
+    defer if (arch) |a| self.alloc.free(a);
+
     for (self.mirrors) |mirror| {
-        const url = try self.fmtPkgURL(mirror, pkg);
+        const url = try self.fmtMirrorURL(
+            mirror,
+            repo,
+            arch.?,
+            filename.?,
+        );
         defer self.alloc.free(url);
 
         dl.download(url, dest) catch continue;
@@ -87,16 +119,18 @@ pub fn downloadDb(
     }
 }
 
-pub fn fmtPkgURL(
+pub fn fmtMirrorURL(
     self: MirrorList,
     mirror: []const u8,
-    pkg: Pkg,
+    repo: []const u8,
+    arch: []const u8,
+    filename: []const u8,
 ) ![]const u8 {
     const repo_size = std.mem.replacementSize(
         u8,
         mirror,
         "$repo",
-        pkg.repo,
+        repo,
     );
     const repo_url = try self.alloc.alloc(u8, repo_size);
     defer self.alloc.free(repo_url);
@@ -104,7 +138,7 @@ pub fn fmtPkgURL(
         u8,
         mirror,
         "$repo",
-        pkg.repo,
+        repo,
         repo_url,
     );
 
@@ -112,7 +146,7 @@ pub fn fmtPkgURL(
         u8,
         repo_url,
         "$arch",
-        pkg.arch,
+        arch,
     );
     const url = try self.alloc.alloc(u8, arch_size);
     defer self.alloc.free(url);
@@ -120,14 +154,14 @@ pub fn fmtPkgURL(
         u8,
         repo_url,
         "$arch",
-        pkg.arch,
+        arch,
         url,
     );
 
     const pkg_url = try Pkg.format(
         self.alloc,
-        "{s}/{s}-{s}-{s}.pkg.tar.zst",
-        .{ url, pkg.name, pkg.version, pkg.arch },
+        "{s}/{s}",
+        .{ url, filename },
     );
 
     return pkg_url;

@@ -23,21 +23,17 @@ test "Package Download" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
+    var db = try Db.init(alloc, "./tests/core.db");
+    defer db.deinit();
+
     var mirrors = try MirrorList.init(alloc, "./tests/mirrors");
     defer mirrors.deinit();
 
-    var flex = try Pkg.init(
-        alloc,
-        "flex",
-        "2.6.4-5",
-    );
-    defer flex.deinit();
-    flex.arch = try alloc.dupe(u8, "x86_64");
-    flex.repo = try alloc.dupe(u8, "core");
-
     try mirrors.downloadPkg(
-        flex,
-        "./tests/flex.pkg.tar.zst",
+        &db,
+        "binutils",
+        "core",
+        "./tests/binutils.pkg.tar.zst",
         &cb,
     );
 }
@@ -57,8 +53,6 @@ test "Sync Mirrors" {
         "x86_64",
         &cb,
     );
-
-    _ = try db.parseArchDb("./tests/core.arch.db");
 }
 
 test "DB Indexing" {
