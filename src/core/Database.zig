@@ -80,7 +80,7 @@ pub fn sync(
         const trailing_slash = if (dest_dir[dest_dir.len - 1] == '/') true else false;
         const dest = try std.fmt.allocPrint(
             self.alloc,
-            "{s}{s}{s}",
+            "{s}{s}{s}.files",
             .{
                 dest_dir,
                 if (!trailing_slash) "/" else "",
@@ -96,15 +96,8 @@ pub fn sync(
             download_cb,
         );
 
-        const dest_db = try std.fmt.allocPrint(
-            self.alloc,
-            "{s}.db",
-            .{dest},
-        );
-        defer self.alloc.free(dest_db);
-
         const file = try std.fs.cwd().openFile(
-            dest_db,
+            dest,
             .{ .mode = .read_only },
         );
 
@@ -114,19 +107,21 @@ pub fn sync(
         while (try reader.nextEntry()) |entry| {
             const c_pathname = archive.c.archive_entry_pathname(entry);
             const pathname: []const u8 = std.mem.span(c_pathname);
-            _ = pathname;
 
             while (true) {
                 const bytes = try reader.readData(&buf);
                 if (bytes == 0) break;
 
-                try desc.index(
-                    self.alloc,
-                    self,
-                    buf[0..bytes],
-                    name,
-                    .Buf,
-                );
+                const delim = std.mem.indexOfScalar(u8, pathname, '/');
+                if (delim != null and std.mem.eql(u8, pathname[delim.? + 1 ..], "desc")) {
+                    try desc.index(
+                        self.alloc,
+                        self,
+                        buf[0..bytes],
+                        name,
+                        .Buf,
+                    );
+                }
             }
         }
     }

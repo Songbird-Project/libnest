@@ -207,7 +207,7 @@ pub fn fmtDbURL(
 
     const db_url = try Pkg.format(
         self.alloc,
-        "{s}/{s}.db",
+        "{s}/{s}.files",
         .{ url, name },
     );
 
