@@ -48,8 +48,8 @@ test "Sync Mirrors" {
 
     try db.sync(
         "./tests/mirrors",
-        "./tests/core.arch.db",
-        "core",
+        "./tests/",
+        &[_][]const u8{"core"},
         "x86_64",
         &cb,
     );
