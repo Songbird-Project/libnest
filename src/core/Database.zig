@@ -1,5 +1,6 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
+const archive = @import("../utils/archive.zig");
 
 const Downloader = @import("../net/Downloader.zig");
 const MirrorList = @import("../net/MirrorList.zig");
@@ -59,17 +60,53 @@ pub fn deinit(self: *Db) void {
 pub fn sync(
     self: *Db,
     mirror_path: []const u8,
-    dest: []const u8,
-    name: []const u8,
+    dest_dir: []const u8,
+    names: []const []const u8,
     arch: []const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
     var mirrors = try MirrorList.init(self.alloc, mirror_path);
     defer mirrors.deinit();
-    try mirrors.downloadDb(
-        name,
-        arch,
-        dest,
-        download_cb,
-    );
+
+    var reader = try archive.Reader.init();
+    defer reader.deinit();
+
+    for (names) |name| {
+        const trailing_slash = if (dest_dir[dest_dir.len - 1] == '/') true else false;
+        const dest = try std.fmt.allocPrint(
+            self.alloc,
+            "{s}{s}{s}",
+            .{
+                dest_dir,
+                if (!trailing_slash) "/" else "",
+                name,
+            },
+        );
+        defer self.alloc.free(dest);
+
+        try mirrors.downloadDb(
+            name,
+            arch,
+            dest,
+            download_cb,
+        );
+
+        const file = try std.fs.cwd().openFile(
+            dest,
+            .{ .mode = .read_only },
+        );
+
+        try reader.openFd(file.handle);
+        var buf: [4096]u8 = undefined;
+
+        while (try reader.nextEntry()) |entry| {
+            const pathname = archive.c.archive_entry_pathname(entry);
+            _ = pathname;
+
+            while (true) {
+                const bytes = try reader.readData(&buf);
+                if (bytes == 0) break;
+            }
+        }
+    }
 }
