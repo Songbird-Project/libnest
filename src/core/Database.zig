@@ -10,10 +10,13 @@ const Db = @This();
 alloc: std.mem.Allocator,
 sqlite_db: *sqlite.Db,
 
-pub fn init(alloc: std.mem.Allocator, path: [:0]const u8) !Db {
+pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
+    const path_z = try alloc.dupeZ(u8, path);
+    defer alloc.free(path_z);
+
     const sqlite_db = try alloc.create(sqlite.Db);
     sqlite_db.* = try sqlite.Db.init(.{
-        .mode = .{ .File = path },
+        .mode = .{ .File = path_z },
         .open_flags = .{
             .write = true,
             .create = true,
@@ -75,7 +78,7 @@ pub fn sync(
         const trailing_slash = if (dest_dir[dest_dir.len - 1] == '/') true else false;
         const dest = try std.fmt.allocPrint(
             self.alloc,
-            "{s}{s}{s}",
+            "{s}{s}{s}.db",
             .{
                 dest_dir,
                 if (!trailing_slash) "/" else "",
