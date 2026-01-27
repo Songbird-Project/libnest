@@ -5,6 +5,8 @@ const archive = @import("../utils/archive.zig");
 const Downloader = @import("../net/Downloader.zig");
 const MirrorList = @import("../net/MirrorList.zig");
 
+const desc = @import("../parse/desc.zig");
+
 const Db = @This();
 
 alloc: std.mem.Allocator,
@@ -78,7 +80,7 @@ pub fn sync(
         const trailing_slash = if (dest_dir[dest_dir.len - 1] == '/') true else false;
         const dest = try std.fmt.allocPrint(
             self.alloc,
-            "{s}{s}{s}.db",
+            "{s}{s}{s}",
             .{
                 dest_dir,
                 if (!trailing_slash) "/" else "",
@@ -94,21 +96,37 @@ pub fn sync(
             download_cb,
         );
 
+        const dest_db = try std.fmt.allocPrint(
+            self.alloc,
+            "{s}.db",
+            .{dest},
+        );
+        defer self.alloc.free(dest_db);
+
         const file = try std.fs.cwd().openFile(
-            dest,
+            dest_db,
             .{ .mode = .read_only },
         );
 
         try reader.openFd(file.handle);
-        var buf: [4096]u8 = undefined;
+        var buf: [8192]u8 = undefined;
 
         while (try reader.nextEntry()) |entry| {
-            const pathname = archive.c.archive_entry_pathname(entry);
+            const c_pathname = archive.c.archive_entry_pathname(entry);
+            const pathname: []const u8 = std.mem.span(c_pathname);
             _ = pathname;
 
             while (true) {
                 const bytes = try reader.readData(&buf);
                 if (bytes == 0) break;
+
+                try desc.index(
+                    self.alloc,
+                    self,
+                    buf[0..bytes],
+                    name,
+                    .Buf,
+                );
             }
         }
     }
