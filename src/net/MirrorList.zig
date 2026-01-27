@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const Downloader = @import("Downloader.zig");
-const Pkg = @import("../core/Package.zig");
 const Db = @import("../core/Database.zig");
 
 const MirrorList = @This();
@@ -158,7 +157,7 @@ pub fn fmtMirrorURL(
         url,
     );
 
-    const pkg_url = try Pkg.format(
+    const pkg_url = try std.fmt.allocPrint(
         self.alloc,
         "{s}/{s}",
         .{ url, filename },
@@ -205,7 +204,7 @@ pub fn fmtDbURL(
         url,
     );
 
-    const db_url = try Pkg.format(
+    const db_url = try std.fmt.allocPrint(
         self.alloc,
         "{s}/{s}.files",
         .{ url, name },
