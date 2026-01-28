@@ -1,11 +1,7 @@
 const std = @import("std");
 
-const Downloader = @import("net/Downloader.zig");
 const MirrorList = @import("net/MirrorList.zig");
-const Pkg = @import("core/Package.zig");
 const Db = @import("core/Database.zig");
-
-const desc = @import("parse/desc.zig");
 
 const PKG_DB: []const u8 = "./tests/pkgs.db";
 const MIRRORS: []const u8 = "./tests/mirrors";
@@ -32,7 +28,7 @@ test "Sync Mirrors" {
     try db.sync(
         MIRRORS,
         "./tests/",
-        &[_][]const u8{"core"},
+        &[_][]const u8{ "core", "multilib" },
         "x86_64",
         &cb,
     );
