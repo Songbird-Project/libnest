@@ -2,12 +2,12 @@ const std = @import("std");
 
 const Db = @import("../core/Database.zig");
 
-pub const descKind = enum {
+pub const inputKind = enum {
     Path,
     Buf,
 };
 
-pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const u8, kind: descKind) !void {
+pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const u8, kind: inputKind) ![]const u8 {
     var fields: std.StringHashMap([]const u8) = if (kind == .Path)
         try parse(alloc, desc)
     else
@@ -86,6 +86,13 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const 
         .optdeps = fields.get("OPTDEPENDS") orelse "[]",
         .checkdeps = fields.get("CHECKDEPENDS") orelse "[]",
     });
+
+    const ret_delim = std.mem.lastIndexOfScalar(
+        u8,
+        fields.get("FILENAME") orelse unreachable,
+        '-',
+    ).?;
+    return try alloc.dupe(u8, (fields.get("FILENAME") orelse unreachable)[0..ret_delim]);
 }
 
 pub fn parse(alloc: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {

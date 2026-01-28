@@ -6,13 +6,14 @@ const Downloader = @import("../net/Downloader.zig");
 const MirrorList = @import("../net/MirrorList.zig");
 
 const desc = @import("../parse/desc.zig");
+const files = @import("../parse/files.zig");
 
 const Db = @This();
 
 alloc: std.mem.Allocator,
 sqlite_db: *sqlite.Db,
 
-pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
+pub fn init(alloc: std.mem.Allocator, path: []const u8, reset: bool) !Db {
     const path_z = try alloc.dupeZ(u8, path);
     defer alloc.free(path_z);
 
@@ -25,8 +26,23 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
         },
         .threading_mode = .MultiThread,
     });
+    errdefer alloc.destroy(sqlite_db);
 
-    try sqlite_db.exec(
+    _ = try sqlite_db.pragma(void, .{}, "journal_mode", "WAL");
+    _ = try sqlite_db.pragma(void, .{}, "synchronous", "NORMAL");
+    _ = try sqlite_db.pragma(void, .{}, "cache_size", "-64000");
+    _ = try sqlite_db.pragma(void, .{}, "temp_store", "MEMORY");
+
+    if (reset) {
+        try sqlite_db.execMulti(
+            \\ DROP TABLE IF EXISTS packages;
+            \\ DROP TABLE IF EXISTS files;
+        , .{});
+    }
+
+    try sqlite_db.execMulti(
+        \\BEGIN;
+        \\
         \\CREATE TABLE IF NOT EXISTS packages(
         \\ id INTEGER PRIMARY KEY AUTOINCREMENT,
         \\ name TEXT NOT NULL,
@@ -48,8 +64,17 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
         \\ optdeps TEXT,
         \\ checkdeps TEXT,
         \\ UNIQUE(name, repo)
-        \\)
-    , .{}, .{});
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS files(
+        \\ id INTEGER PRIMARY KEY AUTOINCREMENT,
+        \\ path TEXT NOT NULL,
+        \\ package_name TEXT,
+        \\ package_repo TEXT
+        \\);
+        \\
+        \\COMMIT;
+    , .{});
 
     return Db{
         .alloc = alloc,
@@ -58,6 +83,8 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
 }
 
 pub fn deinit(self: *Db) void {
+    _ = self.sqlite_db.pragma(struct { i32, i32, i32 }, .{}, "wal_checkpoint", "TRUNCATE") catch {};
+
     self.sqlite_db.deinit();
     self.alloc.destroy(self.sqlite_db);
 }
@@ -75,6 +102,9 @@ pub fn sync(
 
     var reader = try archive.Reader.init();
     defer reader.deinit();
+
+    try self.sqlite_db.exec("BEGIN", .{}, .{});
+    errdefer self.sqlite_db.exec("ROLLBACK", .{}, .{}) catch {};
 
     for (names) |name| {
         const trailing_slash = if (dest_dir[dest_dir.len - 1] == '/') true else false;
@@ -100,29 +130,73 @@ pub fn sync(
             dest,
             .{ .mode = .read_only },
         );
+        defer file.close();
 
         try reader.openFd(file.handle);
         var buf: [8192]u8 = undefined;
 
+        var pkg_name: ?[]const u8 = null;
+        defer if (pkg_name) |pkg| self.alloc.free(pkg);
+
         while (try reader.nextEntry()) |entry| {
             const c_pathname = archive.c.archive_entry_pathname(entry);
             const pathname: []const u8 = std.mem.span(c_pathname);
+            const delim = std.mem.lastIndexOfScalar(u8, pathname, '/');
+
+            if (delim == null) {
+                while (true) {
+                    const bytes = try reader.readData(&buf);
+                    if (bytes == 0) break;
+                }
+                continue;
+            }
+
+            const is_desc = std.mem.eql(u8, pathname[delim.? + 1 ..], "desc");
+            const is_files = std.mem.eql(u8, pathname[delim.? + 1 ..], "files");
+
+            if (!is_desc and !is_files) {
+                while (true) {
+                    const bytes = try reader.readData(&buf);
+                    if (bytes == 0) break;
+                }
+                continue;
+            }
+
+            var content: std.ArrayList(u8) = .empty;
+            defer content.deinit(self.alloc);
 
             while (true) {
                 const bytes = try reader.readData(&buf);
                 if (bytes == 0) break;
+                try content.appendSlice(self.alloc, buf[0..bytes]);
+            }
 
-                const delim = std.mem.indexOfScalar(u8, pathname, '/');
-                if (delim != null and std.mem.eql(u8, pathname[delim.? + 1 ..], "desc")) {
-                    try desc.index(
+            if (is_desc) {
+                if (pkg_name) |pkg| self.alloc.free(pkg);
+
+                pkg_name = try desc.index(
+                    self.alloc,
+                    self,
+                    content.items,
+                    name,
+                    .Buf,
+                );
+            } else if (is_files) {
+                if (pkg_name) |pkg| {
+                    try files.index(
                         self.alloc,
                         self,
-                        buf[0..bytes],
+                        content.items,
+                        pkg,
                         name,
                         .Buf,
                     );
                 }
             }
+
+            content.clearRetainingCapacity();
         }
     }
+
+    try self.sqlite_db.exec("COMMIT", .{}, .{});
 }
