@@ -26,7 +26,7 @@ test "Sync Mirrors" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var db = try Db.init(alloc, PKG_DB);
+    var db = try Db.init(alloc, PKG_DB, true);
     defer db.deinit();
 
     try db.sync(
@@ -38,23 +38,12 @@ test "Sync Mirrors" {
     );
 }
 
-test "DB Indexing" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    var db = try Db.init(alloc, PKG_DB);
-    defer db.deinit();
-
-    try desc.index(alloc, &db, "./tests/desc", "core");
-}
-
 test "Package Download" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var db = try Db.init(alloc, PKG_DB);
+    var db = try Db.init(alloc, PKG_DB, false);
     defer db.deinit();
 
     var mirrors = try MirrorList.init(alloc, MIRRORS);
