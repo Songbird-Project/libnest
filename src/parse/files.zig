@@ -11,8 +11,7 @@ pub fn index(
     alloc: std.mem.Allocator,
     db: *Db,
     desc: []const u8,
-    name: []const u8,
-    repo: []const u8,
+    id: usize,
     kind: inputKind,
 ) !void {
     const files: [][]const u8 = if (kind == .Path)
@@ -27,9 +26,8 @@ pub fn index(
     const query =
         \\INSERT INTO files(
         \\ path,
-        \\ package_name,
-        \\ package_repo
-        \\) VALUES(?,?,?)
+        \\ package_id
+        \\) VALUES(?,?)
     ;
 
     var stmt = try db.sqlite_db.prepare(query);
@@ -39,8 +37,7 @@ pub fn index(
         stmt.reset();
         try stmt.exec(.{}, .{
             .path = file,
-            .package_name = name,
-            .package_repo = repo,
+            .package_id = id,
         });
     }
 }

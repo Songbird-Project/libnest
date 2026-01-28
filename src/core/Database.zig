@@ -69,8 +69,9 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8, reset: bool) !Db {
         \\CREATE TABLE IF NOT EXISTS files(
         \\ id INTEGER PRIMARY KEY AUTOINCREMENT,
         \\ path TEXT NOT NULL,
-        \\ package_name TEXT,
-        \\ package_repo TEXT
+        \\ package_id INTEGER NOT NULL,
+        \\ UNIQUE(package_id, path),
+        \\ FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE
         \\);
         \\
         \\COMMIT;
@@ -100,13 +101,13 @@ pub fn sync(
     var mirrors = try MirrorList.init(self.alloc, mirror_path);
     defer mirrors.deinit();
 
-    var reader = try archive.Reader.init();
-    defer reader.deinit();
-
     try self.sqlite_db.exec("BEGIN", .{}, .{});
     errdefer self.sqlite_db.exec("ROLLBACK", .{}, .{}) catch {};
 
     for (names) |name| {
+        var reader = try archive.Reader.init();
+        defer reader.deinit();
+
         const trailing_slash = if (dest_dir[dest_dir.len - 1] == '/') true else false;
         const dest = try std.fmt.allocPrint(
             self.alloc,
@@ -135,8 +136,7 @@ pub fn sync(
         try reader.openFd(file.handle);
         var buf: [8192]u8 = undefined;
 
-        var pkg_name: ?[]const u8 = null;
-        defer if (pkg_name) |pkg| self.alloc.free(pkg);
+        var pkg_id: ?usize = null;
 
         while (try reader.nextEntry()) |entry| {
             const c_pathname = archive.c.archive_entry_pathname(entry);
@@ -172,9 +172,7 @@ pub fn sync(
             }
 
             if (is_desc) {
-                if (pkg_name) |pkg| self.alloc.free(pkg);
-
-                pkg_name = try desc.index(
+                pkg_id = try desc.index(
                     self.alloc,
                     self,
                     content.items,
@@ -182,13 +180,12 @@ pub fn sync(
                     .Buf,
                 );
             } else if (is_files) {
-                if (pkg_name) |pkg| {
+                if (pkg_id) |id| {
                     try files.index(
                         self.alloc,
                         self,
                         content.items,
-                        pkg,
-                        name,
+                        id,
                         .Buf,
                     );
                 }

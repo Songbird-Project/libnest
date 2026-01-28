@@ -7,7 +7,7 @@ pub const inputKind = enum {
     Buf,
 };
 
-pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const u8, kind: inputKind) ![]const u8 {
+pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const u8, kind: inputKind) !usize {
     var fields: std.StringHashMap([]const u8) = if (kind == .Path)
         try parse(alloc, desc)
     else
@@ -61,12 +61,13 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const 
         \\ optdeps = excluded.optdeps,
         \\ checkdeps = excluded.checkdeps
         \\WHERE packages.version != excluded.version
+        \\RETURNING id
     ;
 
     var stmt = try db.sqlite_db.prepare(query);
     defer stmt.deinit();
 
-    try stmt.exec(.{}, .{
+    const id = try stmt.one(usize, .{}, .{
         .name = fields.get("NAME") orelse unreachable,
         .repo = repo,
         .version = fields.get("VERSION") orelse unreachable,
@@ -87,12 +88,7 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const 
         .checkdeps = fields.get("CHECKDEPENDS") orelse "[]",
     });
 
-    const ret_delim = std.mem.lastIndexOfScalar(
-        u8,
-        fields.get("FILENAME") orelse unreachable,
-        '-',
-    ).?;
-    return try alloc.dupe(u8, (fields.get("FILENAME") orelse unreachable)[0..ret_delim]);
+    return id.?;
 }
 
 pub fn parse(alloc: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
