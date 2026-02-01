@@ -1,13 +1,12 @@
 const std = @import("std");
 
 const Dependency = @import("Dependency.zig");
-const Version = @import("Version.zig");
 
-const Package = @This();
+const Pkg = @This();
 
 alloc: std.mem.Allocator,
 name: []const u8,
-version: Version,
+version: []const u8,
 desc: []const u8,
 arch: []const u8,
 repo: []const u8,
@@ -22,12 +21,12 @@ optdeps: []Dependency,
 pub fn init(
     alloc: std.mem.Allocator,
     name: []const u8,
-    version: Version,
-) !Package {
-    return Package{
+    version: []const u8,
+) !Pkg {
+    return Pkg{
         .alloc = alloc,
         .name = try alloc.dupe(u8, name),
-        .version = version,
+        .version = try alloc.dupe(u8, version),
         .desc = &.{},
         .arch = &.{},
         .repo = &.{},
@@ -41,13 +40,14 @@ pub fn init(
     };
 }
 
-pub fn deinit(self: *Package) void {
+pub fn deinit(self: *Pkg) void {
     self.alloc.free(self.name);
 
     self.alloc.free(self.desc);
     self.alloc.free(self.arch);
     self.alloc.free(self.repo);
     self.alloc.free(self.filename);
+    self.alloc.free(self.version);
 
     for (self.provides) |item| self.alloc.free(item);
     self.alloc.free(self.provides);
@@ -69,21 +69,17 @@ pub fn deinit(self: *Package) void {
 }
 
 pub fn format(
-    self: Package,
+    alloc: std.mem.Allocator,
     comptime fmt: []const u8,
-    opts: std.fmt.FormatOptions,
+    opts: anytype,
 ) ![]const u8 {
-    return try std.fmt.allocPrint(self.alloc, fmt, opts);
+    const str = try std.fmt.allocPrint(alloc, fmt, opts);
+    return str;
 }
 
 pub fn equals(
-    self: Package,
-    comp: Package,
+    self: Pkg,
+    comp: Pkg,
 ) bool {
     return if (self == comp) true else false;
 }
-
-pub fn fromDesc(
-    alloc: std.mem.Allocator,
-    desc: []const u8,
-) !Package {}
