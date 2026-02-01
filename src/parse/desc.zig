@@ -7,7 +7,14 @@ pub const inputKind = enum {
     Buf,
 };
 
-pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const u8, kind: inputKind) !usize {
+pub fn index(
+    alloc: std.mem.Allocator,
+    // db: *Db,
+    desc: []const u8,
+    repo: []const u8,
+    kind: inputKind,
+    stmt: anytype,
+) !?usize {
     var fields: std.StringHashMap([]const u8) = if (kind == .Path)
         try parse(alloc, desc)
     else
@@ -22,50 +29,50 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const 
         fields.deinit();
     }
 
-    const query =
-        \\INSERT INTO packages(
-        \\ name,
-        \\ repo,
-        \\ version,
-        \\ description,
-        \\ arch,
-        \\ license,
-        \\ filename,
-        \\ packager,
-        \\ build_date,
-        \\ checksum,
-        \\ signature,
-        \\ replaces,
-        \\ conflicts,
-        \\ provides,
-        \\ deps,
-        \\ mkdeps,
-        \\ optdeps,
-        \\ checkdeps
-        \\) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        \\ON CONFLICT(name, repo) DO UPDATE SET
-        \\ version = excluded.version,
-        \\ description = excluded.description,
-        \\ arch = excluded.arch,
-        \\ license = excluded.license,
-        \\ filename = excluded.filename,
-        \\ packager = excluded.packager,
-        \\ build_date = excluded.build_date,
-        \\ checksum = excluded.checksum,
-        \\ signature = excluded.signature,
-        \\ replaces = excluded.replaces,
-        \\ conflicts = excluded.conflicts,
-        \\ provides = excluded.provides,
-        \\ deps = excluded.deps,
-        \\ mkdeps = excluded.mkdeps,
-        \\ optdeps = excluded.optdeps,
-        \\ checkdeps = excluded.checkdeps
-        \\WHERE packages.version != excluded.version
-        \\RETURNING id
-    ;
-
-    var stmt = try db.sqlite_db.prepare(query);
-    defer stmt.deinit();
+    // const query =
+    //     \\INSERT INTO packages(
+    //     \\ name,
+    //     \\ repo,
+    //     \\ version,
+    //     \\ description,
+    //     \\ arch,
+    //     \\ license,
+    //     \\ filename,
+    //     \\ packager,
+    //     \\ build_date,
+    //     \\ checksum,
+    //     \\ signature,
+    //     \\ replaces,
+    //     \\ conflicts,
+    //     \\ provides,
+    //     \\ deps,
+    //     \\ mkdeps,
+    //     \\ optdeps,
+    //     \\ checkdeps
+    //     \\) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    //     \\ON CONFLICT(name, repo) DO UPDATE SET
+    //     \\ version = excluded.version,
+    //     \\ description = excluded.description,
+    //     \\ arch = excluded.arch,
+    //     \\ license = excluded.license,
+    //     \\ filename = excluded.filename,
+    //     \\ packager = excluded.packager,
+    //     \\ build_date = excluded.build_date,
+    //     \\ checksum = excluded.checksum,
+    //     \\ signature = excluded.signature,
+    //     \\ replaces = excluded.replaces,
+    //     \\ conflicts = excluded.conflicts,
+    //     \\ provides = excluded.provides,
+    //     \\ deps = excluded.deps,
+    //     \\ mkdeps = excluded.mkdeps,
+    //     \\ optdeps = excluded.optdeps,
+    //     \\ checkdeps = excluded.checkdeps
+    //     \\WHERE packages.version != excluded.version
+    //     \\RETURNING id
+    // ;
+    //
+    // var stmt = try db.sqlite_db.prepare(query);
+    // defer stmt.deinit();
 
     const id = try stmt.one(usize, .{}, .{
         .name = fields.get("NAME") orelse unreachable,
@@ -87,8 +94,9 @@ pub fn index(alloc: std.mem.Allocator, db: *Db, desc: []const u8, repo: []const 
         .optdeps = fields.get("OPTDEPENDS") orelse "[]",
         .checkdeps = fields.get("CHECKDEPENDS") orelse "[]",
     });
+    stmt.reset();
 
-    return id.?;
+    return id;
 }
 
 pub fn parse(alloc: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {

@@ -9,10 +9,11 @@ pub const inputKind = enum {
 
 pub fn index(
     alloc: std.mem.Allocator,
-    db: *Db,
+    // db: *Db,
     desc: []const u8,
     id: usize,
     kind: inputKind,
+    stmt: anytype,
 ) !void {
     const files: [][]const u8 = if (kind == .Path)
         try parse(alloc, desc)
@@ -23,15 +24,16 @@ pub fn index(
         alloc.free(files);
     }
 
-    const query =
-        \\INSERT INTO files(
-        \\ path,
-        \\ package_id
-        \\) VALUES(?,?)
-    ;
-
-    var stmt = try db.sqlite_db.prepare(query);
-    defer stmt.deinit();
+    // const query =
+    //     \\INSERT INTO files(
+    //     \\ path,
+    //     \\ package_id
+    //     \\) VALUES(?,?)
+    //     // \\ON CONFLICT(package_id, path) DO NOTHING
+    // ;
+    //
+    // var stmt = try db.sqlite_db.prepare(query);
+    // defer stmt.deinit();
 
     for (files) |file| {
         stmt.reset();
