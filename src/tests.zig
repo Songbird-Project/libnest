@@ -22,13 +22,13 @@ test "Sync Mirrors" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var db = try Db.init(alloc, PKG_DB, true);
+    var db = try Db.init(alloc, PKG_DB, false);
     defer db.deinit();
 
     try db.sync(
         MIRRORS,
         "./tests/",
-        &[_][]const u8{ "core", "multilib" },
+        &[_][]const u8{ "core", "multilib", "extra" },
         "x86_64",
         &cb,
     );
