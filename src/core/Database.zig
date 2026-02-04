@@ -110,6 +110,17 @@ pub fn deinit(self: *Db) void {
     c.mdb_dbi_close(self.env, self.file_lkp);
     c.mdb_env_close(self.env);
 }
+pub fn newTxn(self: *Db) !*c.MDB_txn {
+    var txn: ?*Db.c.MDB_txn = null;
+    try Db.checkCode(Db.c.mdb_txn_begin(
+        self.env,
+        null,
+        0,
+        &txn,
+    ));
+
+    return txn.?;
+}
 
 pub fn insert(
     txn: *c.MDB_txn,
