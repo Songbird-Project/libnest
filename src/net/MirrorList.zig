@@ -67,7 +67,6 @@ pub fn downloadPkg(
     )[0..mdb_name_repo.mv_size];
     const name_repo_delim = std.mem.indexOfScalar(u8, name_repo, 0);
     const repo = name_repo[name_repo_delim.? + 1 ..];
-    std.debug.print("\n\n {s} \n\n", .{repo});
 
     for (self.mirrors) |mirror| {
         const url = try self.fmtMirrorURL(
