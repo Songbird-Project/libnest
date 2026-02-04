@@ -28,12 +28,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const sqlite = b.dependency("sqlite", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    module.addImport("sqlite", sqlite.module("sqlite"));
-
     const curl = b.dependency("curl", .{ .link_vendor = false });
     module.addImport("curl", curl.module("curl"));
 
@@ -48,9 +42,9 @@ pub fn build(b: *std.Build) void {
 
     tests.linkSystemLibrary("curl");
     tests.linkSystemLibrary("archive");
+    tests.linkSystemLibrary("lmdb");
     tests.linkLibC();
     tests.root_module.addImport("curl", curl.module("curl"));
-    tests.root_module.addImport("sqlite", sqlite.module("sqlite"));
 
     const run_tests = b.addRunArtifact(tests);
 
@@ -71,6 +65,7 @@ pub fn build(b: *std.Build) void {
 
         lib.linkSystemLibrary("curl");
         lib.linkSystemLibrary("archive");
+        lib.linkSystemLibrary("lmdb");
         lib.linkLibC();
         b.installArtifact(lib);
     }
@@ -84,6 +79,7 @@ pub fn build(b: *std.Build) void {
 
         lib.linkSystemLibrary("curl");
         lib.linkSystemLibrary("archive");
+        lib.linkSystemLibrary("lmdb");
         lib.linkLibC();
         b.installArtifact(lib);
     }
