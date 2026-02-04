@@ -22,16 +22,21 @@ test "Sync Mirrors" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var db = try Db.init(alloc, PKG_DB, false);
+    const repos = [_][]const u8{ "core", "multilib", "extra" };
+
+    var db = try Db.init(alloc, PKG_DB);
     defer db.deinit();
 
-    try db.sync(
-        MIRRORS,
-        "./tests/",
-        &[_][]const u8{ "core", "multilib", "extra" },
-        "x86_64",
-        &cb,
-    );
+    for (repos) |repo| {
+        try db.sync(
+            MIRRORS,
+            "./tests/",
+            repo,
+            "x86_64",
+            50_000,
+            &cb,
+        );
+    }
 }
 
 test "Package Download" {
@@ -39,16 +44,34 @@ test "Package Download" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var db = try Db.init(alloc, PKG_DB, false);
+    var db = try Db.init(alloc, PKG_DB);
     defer db.deinit();
 
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
-    try mirrors.downloadPkg(
-        &db,
+    var txn: ?*Db.c.MDB_txn = null;
+    try Db.checkCode(Db.c.mdb_txn_begin(
+        db.env,
+        null,
+        0,
+        &txn,
+    ));
+    const pkgs = try db.queryPkgRepo(
+        txn.?,
         "binutils",
-        "core",
+    );
+    defer alloc.free(pkgs);
+    if (pkgs.len > 1) {
+        @panic("unhandled :/");
+    }
+
+    const pkg = try db.queryPkg(txn.?, &pkgs[0]);
+    std.debug.print("\n\n{s} | {s} | {s}\n\n", .{ pkg.filename, pkg.arch, pkg.description });
+
+    try mirrors.downloadPkg(
+        pkgs[0],
+        pkg,
         "./tests/binutils.pkg.tar.zst",
         &cb,
     );
