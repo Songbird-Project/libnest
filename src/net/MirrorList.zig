@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Downloader = @import("Downloader.zig");
 const Db = @import("../core/Database.zig");
+const Pkg = @import("../core/Package.zig");
 
 const MirrorList = @This();
 
@@ -52,45 +53,28 @@ pub fn deinit(self: *MirrorList) void {
 
 pub fn downloadPkg(
     self: MirrorList,
-    db: *Db,
-    name: []const u8,
-    repo: []const u8,
+    mdb_name_repo: Db.c.MDB_val,
+    pkg: Pkg,
     dest: []const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
     var dl: Downloader = try .init(self.alloc, 3, download_cb);
     defer dl.deinit();
 
-    const filename_query =
-        \\SELECT filename FROM packages WHERE name=? and repo=?
-    ;
-    var filename_stmt = try db.sqlite_db.prepare(filename_query);
-    defer filename_stmt.deinit();
-
-    const filename = try filename_stmt.oneAlloc([]const u8, self.alloc, .{}, .{
-        .name = name,
-        .repo = repo,
-    });
-    defer if (filename) |f| self.alloc.free(f);
-
-    const arch_query =
-        \\SELECT arch FROM packages WHERE name=? and repo=?
-    ;
-    var arch_stmt = try db.sqlite_db.prepare(arch_query);
-    defer arch_stmt.deinit();
-
-    const arch = try arch_stmt.oneAlloc([]const u8, self.alloc, .{}, .{
-        .name = name,
-        .repo = repo,
-    });
-    defer if (arch) |a| self.alloc.free(a);
+    const name_repo = @as(
+        [*]const u8,
+        @ptrCast(mdb_name_repo.mv_data),
+    )[0..mdb_name_repo.mv_size];
+    const name_repo_delim = std.mem.indexOfScalar(u8, name_repo, 0);
+    const repo = name_repo[name_repo_delim.? + 1 ..];
+    std.debug.print("\n\n {s} \n\n", .{repo});
 
     for (self.mirrors) |mirror| {
         const url = try self.fmtMirrorURL(
             mirror,
             repo,
-            arch.?,
-            filename.?,
+            pkg.arch,
+            pkg.filename,
         );
         defer self.alloc.free(url);
 
