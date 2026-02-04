@@ -50,15 +50,9 @@ test "Package Download" {
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
-    var txn: ?*Db.c.MDB_txn = null;
-    try Db.checkCode(Db.c.mdb_txn_begin(
-        db.env,
-        null,
-        0,
-        &txn,
-    ));
+    const txn = try db.newTxn();
     const pkgs = try db.queryPkgRepo(
-        txn.?,
+        txn,
         "binutils",
     );
     defer alloc.free(pkgs);
@@ -66,8 +60,7 @@ test "Package Download" {
         @panic("unhandled :/");
     }
 
-    const pkg = try db.queryPkg(txn.?, &pkgs[0]);
-    std.debug.print("\n\n{s} | {s} | {s}\n\n", .{ pkg.filename, pkg.arch, pkg.description });
+    const pkg = try db.queryPkg(txn, &pkgs[0]);
 
     try mirrors.downloadPkg(
         pkgs[0],
