@@ -110,7 +110,7 @@ pub fn deinit(self: *Db) void {
     c.mdb_dbi_close(self.env, self.file_lkp);
     c.mdb_env_close(self.env);
 }
-pub fn newTxn(self: *Db) !*c.MDB_txn {
+pub fn startTxn(self: *Db) !*c.MDB_txn {
     var txn: ?*Db.c.MDB_txn = null;
     try Db.checkCode(Db.c.mdb_txn_begin(
         self.env,
@@ -120,6 +120,10 @@ pub fn newTxn(self: *Db) !*c.MDB_txn {
     ));
 
     return txn.?;
+}
+
+pub fn endTxn(txn: *c.MDB_txn) !void {
+    try checkCode(c.mdb_txn_commit(txn));
 }
 
 pub fn insert(
@@ -321,16 +325,13 @@ pub fn queryPkg(self: *Db, txn: *c.MDB_txn, key: *c.MDB_val) !Pkg {
 
 pub fn sync(
     self: *Db,
-    mirror_path: []const u8,
+    mirrors: *MirrorList,
     dest_dir: []const u8,
     repo: []const u8,
     arch: []const u8,
     batch_size: usize,
     download_cb: ?*const Downloader.callback,
 ) !void {
-    var mirrors = try MirrorList.init(self.alloc, mirror_path);
-    defer mirrors.deinit();
-
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
@@ -379,11 +380,8 @@ pub fn sync(
         }
 
         const is_desc = std.mem.eql(u8, pathrepo[delim.? + 1 ..], "desc");
-        // const is_files = std.mem.eql(u8, pathrepo[delim.? + 1 ..], "files");
 
-        if (!is_desc
-        // and !is_files
-        ) {
+        if (!is_desc) {
             while (true) {
                 const bytes = try reader.readData(&buf);
                 if (bytes == 0) break;
@@ -396,7 +394,7 @@ pub fn sync(
 
         while (true) {
             const bytes = try reader.readData(&buf);
-            if (bytes == 0) break;
+            if (bytes <= 0) break;
             try content.appendSlice(self.alloc, buf[0..bytes]);
         }
 
@@ -425,22 +423,92 @@ pub fn sync(
 
             batched += 1;
         }
-        // else if (is_files) {
-        //     if (pkg_key) |pkg| {
-        //         try files.index(
-        //             self.alloc,
-        //             self,
-        //             txn.?,
-        //             content.items,
-        //             pkg,
-        //         );
-        //     }
-        // }
 
         content.clearRetainingCapacity();
     }
 
     if (in_trans) {
         try checkCode(c.mdb_txn_commit(txn.?));
+    }
+}
+
+pub fn install(
+    self: *Db,
+    mirrors: *MirrorList,
+    key: c.MDB_val,
+    pkg: Pkg,
+    txn: *c.MDB_txn,
+    prefix: ?[]const u8,
+    download_cb: ?*const Downloader.callback,
+) !void {
+    var reader = try archive.Reader.init();
+    defer reader.deinit();
+
+    const pkg_key = @as([*]const u8, @ptrCast(key.mv_data))[0..key.mv_size];
+
+    const dest = try std.fmt.allocPrint(
+        self.alloc,
+        "{s}/tmp/{s}",
+        .{
+            if (prefix) |p| p else "",
+            pkg.filename,
+        },
+    );
+    defer self.alloc.free(dest);
+
+    const file_delim = std.mem.lastIndexOfScalar(u8, dest, '/').?;
+    try std.fs.cwd().makePath(dest[0..file_delim]);
+
+    try mirrors.downloadPkg(
+        key,
+        pkg,
+        dest,
+        download_cb,
+    );
+
+    const file = try std.fs.cwd().openFile(
+        dest,
+        .{ .mode = .read_only },
+    );
+    defer file.close();
+
+    try reader.openFd(file.handle);
+    var buf: [8192]u8 = undefined;
+    while (try reader.nextEntry()) |entry| {
+        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+        const path_type = archive.c.archive_entry_mode(entry) & 0o170000;
+        const install_path = try std.fmt.allocPrint(
+            self.alloc,
+            "{s}/{s}",
+            .{
+                if (prefix) |p| p else "",
+                path,
+            },
+        );
+        defer self.alloc.free(install_path);
+
+        if (path_type == 0o100000) {
+            const f =
+                try std.fs.cwd().createFile(
+                    install_path,
+                    .{},
+                );
+
+            var content: std.ArrayList(u8) = .empty;
+            defer content.deinit(self.alloc);
+
+            while (true) {
+                const bytes = try reader.readData(&buf);
+                if (bytes <= 0) break;
+                _ = try f.write(buf[0..bytes]);
+            }
+
+            try insert(txn, self.pkg_lkp, pkg_key, install_path);
+            try insert(txn, self.pkgs_db, install_path, pkg_key);
+
+            content.clearRetainingCapacity();
+        } else if (path_type == 0o040000) {
+            try std.fs.cwd().makePath(install_path);
+        }
     }
 }
