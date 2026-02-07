@@ -27,9 +27,12 @@ test "Sync Mirrors" {
     var db = try Db.init(alloc, PKG_DB);
     defer db.deinit();
 
+    var mirrors = try MirrorList.init(alloc, MIRRORS);
+    defer mirrors.deinit();
+
     for (repos) |repo| {
         try db.sync(
-            MIRRORS,
+            &mirrors,
             "./tests/",
             repo,
             "x86_64",
@@ -39,7 +42,38 @@ test "Sync Mirrors" {
     }
 }
 
-test "Package Download" {
+// test "Package Download" {
+//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     defer _ = gpa.deinit();
+//     const alloc = gpa.allocator();
+//
+//     var db = try Db.init(alloc, PKG_DB);
+//     defer db.deinit();
+//
+//     var mirrors = try MirrorList.init(alloc, MIRRORS);
+//     defer mirrors.deinit();
+//
+//     const txn = try db.newTxn();
+//     const pkgs = try db.queryPkgRepo(
+//         txn,
+//         "binutils",
+//     );
+//     defer alloc.free(pkgs);
+//     if (pkgs.len > 1) {
+//         @panic("unhandled :/");
+//     }
+//
+//     const pkg = try db.queryPkg(txn, &pkgs[0]);
+//
+//     try mirrors.downloadPkg(
+//         pkgs[0],
+//         pkg,
+//         "./tests/binutils.pkg.tar.zst",
+//         &cb,
+//     );
+// }
+
+test "Package Install" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -50,7 +84,7 @@ test "Package Download" {
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
-    const txn = try db.newTxn();
+    const txn = try db.startTxn();
     const pkgs = try db.queryPkgRepo(
         txn,
         "binutils",
@@ -61,11 +95,13 @@ test "Package Download" {
     }
 
     const pkg = try db.queryPkg(txn, &pkgs[0]);
-
-    try mirrors.downloadPkg(
+    try db.install(
+        &mirrors,
         pkgs[0],
         pkg,
-        "./tests/binutils.pkg.tar.zst",
+        txn,
+        "./tests",
         &cb,
     );
+    try Db.endTxn(txn);
 }
