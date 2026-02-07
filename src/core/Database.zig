@@ -40,6 +40,7 @@ alloc: std.mem.Allocator,
 env: *c.MDB_env,
 pkgs_db: c.MDB_dbi,
 files_db: c.MDB_dbi,
+installed_db: c.MDB_dbi,
 file_lkp: c.MDB_dbi,
 pkg_lkp: c.MDB_dbi,
 
@@ -63,6 +64,7 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
 
     var pkgs_db: c.MDB_dbi = undefined;
     var files_db: c.MDB_dbi = undefined;
+    var installed_db: c.MDB_dbi = undefined;
     var pkg_lkp: c.MDB_dbi = undefined;
     var file_lkp: c.MDB_dbi = undefined;
 
@@ -77,6 +79,12 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
         "files",
         c.MDB_CREATE,
         &files_db,
+    ));
+    try checkCode(c.mdb_dbi_open(
+        txn.?,
+        "installed",
+        c.MDB_CREATE,
+        &installed_db,
     ));
     try checkCode(c.mdb_dbi_open(
         txn.?,
@@ -98,6 +106,7 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
         .env = env.?,
         .pkgs_db = pkgs_db,
         .files_db = files_db,
+        .installed_db = installed_db,
         .pkg_lkp = pkg_lkp,
         .file_lkp = file_lkp,
     };
@@ -321,6 +330,116 @@ pub fn queryPkg(self: *Db, txn: *c.MDB_txn, key: *c.MDB_val) !Pkg {
     ));
 
     return readPkg(val);
+}
+
+pub fn insertInstalledPkg(
+    alloc: std.mem.Allocator,
+    txn: *c.MDB_txn,
+    dbi: c.MDB_dbi,
+    key: c.MDB_val,
+    fields: Pkg.Installed,
+) !void {
+    const pkg_len =
+        @sizeOf(Pkg.Installed.Header) +
+        fields.version.len +
+        fields.description.len +
+        fields.url.len +
+        fields.arch.len +
+        fields.license.len +
+        fields.packager.len +
+        fields.deps.len +
+        fields.optdeps.len;
+    var buf = try alloc.alloc(u8, pkg_len);
+    defer alloc.free(buf);
+    var w: usize = 0;
+
+    const header: Pkg.Installed.Header = .{
+        .build_date = fields.build_date,
+        .size = fields.size,
+        .version_len = @intCast(fields.version.len),
+        .description_len = @intCast(fields.description.len),
+        .url_len = @intCast(fields.url.len),
+        .arch_len = @intCast(fields.arch.len),
+        .license_len = @intCast(fields.license.len),
+        .packager_len = @intCast(fields.packager.len),
+        .deps_len = @intCast(fields.deps.len),
+        .optdeps_len = @intCast(fields.deps.len),
+    };
+
+    @memmove(
+        buf[0..@sizeOf(Pkg.Header)],
+        std.mem.asBytes(&header),
+    );
+    w += @sizeOf(Pkg.Header);
+
+    inline for ([_][]const u8{
+        fields.version,
+        fields.description,
+        fields.url,
+        fields.arch,
+        fields.license,
+        fields.packager,
+        fields.deps,
+        fields.optdeps,
+    }) |field| {
+        @memmove(buf[w..][0..field.len], field);
+        w += field.len;
+    }
+
+    var val = mdbVal(buf[0..w]);
+
+    try checkCode(c.mdb_put(
+        txn,
+        dbi,
+        &key,
+        &val,
+        0,
+    ));
+}
+
+pub fn readInstalledPkg(val: c.MDB_val) Pkg.Installed {
+    const raw = @as([*]const u8, @ptrCast(val.mv_data));
+
+    var header: Pkg.Installed.Header = undefined;
+    @memcpy(
+        std.mem.asBytes(&header),
+        raw[0..@sizeOf(Pkg.Installed.Header)],
+    );
+
+    var ptr: usize = @sizeOf(Pkg.Installed.Header);
+    return .{
+        .build_date = header.build_date,
+
+        .version = Pkg.Installed.Header.nextField(raw, header.version_len, &ptr),
+        .description = Pkg.Installed.Header.nextField(raw, header.description_len, &ptr),
+        .url = Pkg.Installed.Header.nextField(raw, header.url_len, &ptr),
+        .arch = Pkg.Installed.Header.nextField(raw, header.arch_len, &ptr),
+        .license = Pkg.Installed.Header.nextField(raw, header.license_len, &ptr),
+        .packager = Pkg.Installed.Header.nextField(raw, header.packager_len, &ptr),
+        .deps = Pkg.Installed.Header.nextField(raw, header.deps_len, &ptr),
+        .optdeps = Pkg.Installed.Header.nextField(raw, header.optdeps_len, &ptr),
+    };
+}
+
+pub fn queryInstalledPkg(self: *Db, txn: *c.MDB_txn, key: *c.MDB_val) !Pkg.Installed {
+    var cursor: ?*c.MDB_cursor = null;
+    try checkCode(c.mdb_cursor_open(
+        txn,
+        self.installed_db,
+        &cursor,
+    ));
+    defer c.mdb_cursor_close(cursor);
+
+    var val: c.MDB_val = undefined;
+
+    try checkCode(c.mdb_cursor_get(
+        cursor.?,
+        key,
+        &val,
+        c.MDB_SET,
+    ));
+
+    return readInstalledPkg(val);
 }
 
 pub fn sync(
