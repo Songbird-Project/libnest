@@ -87,7 +87,7 @@ test "Package Install" {
     const txn = try db.startTxn();
     const pkgs = try db.queryPkgRepo(
         txn,
-        "binutils",
+        "tree",
     );
     defer alloc.free(pkgs);
     if (pkgs.len > 1) {
