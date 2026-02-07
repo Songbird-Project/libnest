@@ -9,9 +9,10 @@ pub const Reader = struct {
 
     pub fn init() !Reader {
         const archive = c.archive_read_new() orelse
-            return error.OutOfMemory;
+            return error.UnableToCreateReader;
 
         _ = c.archive_read_support_format_tar(archive);
+        _ = c.archive_read_support_format_mtree(archive);
         _ = c.archive_read_support_filter_all(archive);
 
         return .{ .archive = archive };
