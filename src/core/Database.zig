@@ -444,20 +444,41 @@ pub fn install(
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
+    const writer = archive.c.archive_write_disk_new() orelse
+        return error.UnableToCreateWriter;
+    defer _ = archive.c.archive_write_free(writer);
+
+    _ = archive.c.archive_write_disk_set_options(
+        writer,
+        archive.c.ARCHIVE_EXTRACT_PERM |
+            archive.c.ARCHIVE_EXTRACT_TIME |
+            archive.c.ARCHIVE_EXTRACT_OWNER |
+            archive.c.ARCHIVE_EXTRACT_ACL |
+            archive.c.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
+            archive.c.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
+            archive.c.ARCHIVE_EXTRACT_UNLINK |
+            archive.c.ARCHIVE_EXTRACT_FFLAGS,
+    );
+
     const pkg_key = @as([*]const u8, @ptrCast(key.mv_data))[0..key.mv_size];
 
-    const dest = try std.fmt.allocPrint(
-        self.alloc,
-        "{s}/tmp/{s}",
-        .{
-            if (prefix) |p| p else "",
-            pkg.filename,
-        },
-    );
-    defer self.alloc.free(dest);
+    const cache = try std.fs.path.join(self.alloc, &.{
+        prefix orelse "/",
+        "var",
+        "cache",
+        if (std.mem.indexOf(u8, pkg.filename, ".pkg.tar.")) |i|
+            pkg.filename[0..i]
+        else
+            pkg.checksum,
+    });
+    defer self.alloc.free(cache);
+    try std.fs.cwd().makePath(cache);
 
-    const file_delim = std.mem.lastIndexOfScalar(u8, dest, '/').?;
-    try std.fs.cwd().makePath(dest[0..file_delim]);
+    const dest = try std.fs.path.join(self.alloc, &.{
+        cache,
+        pkg.filename,
+    });
+    defer self.alloc.free(dest);
 
     try mirrors.downloadPkg(
         key,
@@ -476,39 +497,104 @@ pub fn install(
     var buf: [8192]u8 = undefined;
     while (try reader.nextEntry()) |entry| {
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+        if (std.fs.path.isAbsolute(path)) return error.AbsolutePathInPkg;
+
         const path_type = archive.c.archive_entry_mode(entry) & 0o170000;
-        const install_path = try std.fmt.allocPrint(
-            self.alloc,
-            "{s}/{s}",
-            .{
-                if (prefix) |p| p else "",
+        const install_path = if (std.mem.startsWith(u8, path, "."))
+            try std.fs.path.join(self.alloc, &.{
+                cache,
                 path,
-            },
-        );
+            })
+        else
+            try std.fs.path.join(self.alloc, &.{
+                prefix orelse "/",
+                path,
+            });
         defer self.alloc.free(install_path);
 
+        archive.c.archive_entry_set_pathname(entry, install_path.ptr);
+        const ret = archive.c.archive_write_header(writer, entry);
+        if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
+
         if (path_type == 0o100000) {
-            const f =
-                try std.fs.cwd().createFile(
-                    install_path,
-                    .{},
-                );
-
-            var content: std.ArrayList(u8) = .empty;
-            defer content.deinit(self.alloc);
-
             while (true) {
                 const bytes = try reader.readData(&buf);
                 if (bytes <= 0) break;
-                _ = try f.write(buf[0..bytes]);
+
+                _ = archive.c.archive_write_data(
+                    writer,
+                    buf[0..bytes].ptr,
+                    bytes,
+                );
             }
 
-            try insert(txn, self.pkg_lkp, pkg_key, install_path);
-            try insert(txn, self.pkgs_db, install_path, pkg_key);
-
-            content.clearRetainingCapacity();
-        } else if (path_type == 0o040000) {
-            try std.fs.cwd().makePath(install_path);
+            if (!std.mem.startsWith(u8, path, ".")) {
+                try insert(txn, self.pkg_lkp, pkg_key, install_path);
+                try insert(txn, self.pkgs_db, install_path, pkg_key);
+            }
         }
+
+        _ = archive.c.archive_write_finish_entry(writer);
+    }
+
+    const mtree_path = try std.fs.path.join(self.alloc, &.{
+        cache,
+        ".MTREE",
+    });
+    defer self.alloc.free(mtree_path);
+    try parseMTREE(self, mtree_path, prefix);
+}
+
+fn parseMTREE(
+    self: *Db,
+    mtree_path: []const u8,
+    prefix: ?[]const u8,
+) !void {
+    var reader = try archive.Reader.init();
+    defer reader.deinit();
+
+    const writer = archive.c.archive_write_disk_new() orelse
+        return error.UnableToCreateWriter;
+    defer _ = archive.c.archive_write_free(writer);
+
+    _ = archive.c.archive_write_disk_set_standard_lookup(writer);
+    _ = archive.c.archive_write_disk_set_options(
+        writer,
+        archive.c.ARCHIVE_EXTRACT_PERM |
+            archive.c.ARCHIVE_EXTRACT_TIME |
+            archive.c.ARCHIVE_EXTRACT_OWNER |
+            archive.c.ARCHIVE_EXTRACT_ACL |
+            archive.c.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
+            archive.c.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
+            archive.c.ARCHIVE_EXTRACT_UNLINK |
+            archive.c.ARCHIVE_EXTRACT_FFLAGS,
+    );
+
+    const file = std.fs.cwd().openFile(
+        mtree_path,
+        .{ .mode = .read_only },
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer file.close();
+
+    try reader.openFd(file.handle);
+    while (try reader.nextEntry()) |entry| {
+        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+        if (std.mem.startsWith(u8, path, ".")) continue;
+
+        if (std.fs.path.isAbsolute(path)) return error.AbsolutePathInMTREE;
+
+        const install_path = try std.fs.path.join(self.alloc, &.{
+            prefix orelse "/",
+            path,
+        });
+        defer self.alloc.free(install_path);
+
+        archive.c.archive_entry_set_pathname(entry, install_path.ptr);
+        const ret = archive.c.archive_write_header(writer, entry);
+        if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
+        _ = archive.c.archive_write_finish_entry(writer);
     }
 }
