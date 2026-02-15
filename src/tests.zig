@@ -85,8 +85,9 @@ test "Package Install" {
     defer mirrors.deinit();
 
     const txn = try db.startTxn();
-    const pkgs = try db.queryPkgRepo(
+    const pkgs = try db.queryLkpRepo(
         txn,
+        db.pkg_lkp,
         "tree",
     );
     defer alloc.free(pkgs);
