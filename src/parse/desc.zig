@@ -38,12 +38,14 @@ pub fn index(
         .checkdeps = fields.get("CHECKDEPENDS") orelse "[]",
     };
 
-    var buf: [256]u8 = undefined;
+    // var buf: [256]u8 = undefined;
     const key = Db.makeKey(
-        &buf,
+        alloc,
+        // &buf,
         repo,
         fields.get("NAME") orelse unreachable,
     );
+    defer alloc.free(key);
     try Db.insertPkg(
         alloc,
         txn,
