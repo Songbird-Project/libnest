@@ -27,11 +27,17 @@ pub fn mdbVal(bytes: []const u8) c.MDB_val {
     };
 }
 
-pub fn makeKey(buf: []u8, repo: []const u8, name: []const u8) []const u8 {
-    @memmove(buf[0..name.len], name);
-    buf[name.len] = 0;
-    @memmove(buf[name.len + 1 ..][0..repo.len], repo);
-    return buf[0 .. name.len + repo.len + 1];
+pub fn makeKey(
+    alloc: std.mem.Allocator,
+    // buf: []u8,
+    repo: []const u8,
+    name: []const u8,
+) []const u8 {
+    // @memmove(buf[0..name.len], name);
+    // buf[name.len] = 0;
+    // @memmove(buf[name.len + 1 ..][0..repo.len], repo);
+    // return buf[0 .. name.len + repo.len + 1];
+    return std.mem.concat(alloc, u8, &.{ name, "\x00", repo });
 }
 
 const Db = @This();
@@ -115,13 +121,14 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
 pub fn deinit(self: *Db) void {
     c.mdb_dbi_close(self.env, self.pkgs_db);
     c.mdb_dbi_close(self.env, self.files_db);
+    c.mdb_dbi_close(self.env, self.installed_db);
     c.mdb_dbi_close(self.env, self.pkg_lkp);
     c.mdb_dbi_close(self.env, self.file_lkp);
     c.mdb_env_close(self.env);
 }
 pub fn startTxn(self: *Db) !*c.MDB_txn {
-    var txn: ?*Db.c.MDB_txn = null;
-    try Db.checkCode(Db.c.mdb_txn_begin(
+    var txn: ?*c.MDB_txn = null;
+    try checkCode(c.mdb_txn_begin(
         self.env,
         null,
         0,
@@ -228,12 +235,14 @@ pub fn insertPkg(
         w += field.len;
     }
 
-    var key_buf: [256]u8 = undefined;
+    // var key_buf: [256]u8 = undefined;
     var key = mdbVal(makeKey(
-        &key_buf,
+        alloc,
+        // &key_buf,
         repo,
         pkg_name,
     ));
+    defer alloc.free(key);
     var val = mdbVal(buf[0..w]);
 
     try checkCode(c.mdb_put(
@@ -247,6 +256,7 @@ pub fn insertPkg(
 
 pub fn readPkg(val: c.MDB_val) Pkg {
     const raw = @as([*]const u8, @ptrCast(val.mv_data));
+    if (val.mv_size < @sizeOf(Pkg.Header)) return error.CorruptPkg;
 
     var header: Pkg.Header = undefined;
     @memcpy(
@@ -276,10 +286,15 @@ pub fn readPkg(val: c.MDB_val) Pkg {
     };
 }
 
-pub fn queryPkgRepo(self: *Db, txn: *c.MDB_txn, name: []const u8) ![]c.MDB_val {
+pub fn queryLkpRepo(
+    self: *Db,
+    txn: *c.MDB_txn,
+    dbi: c.MDB_dbi,
+    name: []const u8,
+) ![]c.MDB_val {
     var cursor: ?*c.MDB_cursor = null;
     try checkCode(
-        c.mdb_cursor_open(txn, self.pkg_lkp, &cursor),
+        c.mdb_cursor_open(txn, dbi, &cursor),
     );
     defer c.mdb_cursor_close(cursor);
 
@@ -298,7 +313,7 @@ pub fn queryPkgRepo(self: *Db, txn: *c.MDB_txn, name: []const u8) ![]c.MDB_val {
 
     var ret: c_int = 0;
     while (ret == 0) {
-        try pkgs.append(self.alloc, val);
+        try pkgs.append(self.alloc, self.alloc.dupe(c.MDB_val, val));
 
         ret = c.mdb_cursor_get(
             cursor.?,
@@ -363,14 +378,14 @@ pub fn insertInstalledPkg(
         .license_len = @intCast(fields.license.len),
         .packager_len = @intCast(fields.packager.len),
         .deps_len = @intCast(fields.deps.len),
-        .optdeps_len = @intCast(fields.deps.len),
+        .optdeps_len = @intCast(fields.optdeps.len),
     };
 
     @memmove(
-        buf[0..@sizeOf(Pkg.Header)],
+        buf[0..@sizeOf(Pkg.Installed.Header)],
         std.mem.asBytes(&header),
     );
-    w += @sizeOf(Pkg.Header);
+    w += @sizeOf(Pkg.Installed.Header);
 
     inline for ([_][]const u8{
         fields.version,
@@ -521,6 +536,7 @@ pub fn sync(
             if (batched >= batch_size and in_trans) {
                 try checkCode(c.mdb_txn_commit(txn.?));
                 in_trans = false;
+                batched = 0;
             }
             if (!in_trans) {
                 try checkCode(c.mdb_txn_begin(
@@ -646,11 +662,6 @@ pub fn install(
                     bytes,
                 );
             }
-
-            if (!std.mem.startsWith(u8, path, ".")) {
-                try insert(txn, self.pkg_lkp, pkg_key, install_path);
-                try insert(txn, self.pkgs_db, install_path, pkg_key);
-            }
         }
 
         _ = archive.c.archive_write_finish_entry(writer);
@@ -661,11 +672,19 @@ pub fn install(
         ".MTREE",
     });
     defer self.alloc.free(mtree_path);
-    try parseMTREE(self, mtree_path, prefix);
+    try parseMTREE(
+        self,
+        txn,
+        pkg_key,
+        mtree_path,
+        prefix,
+    );
 }
 
 fn parseMTREE(
     self: *Db,
+    txn: *c.MDB_txn,
+    key: []const u8,
     mtree_path: []const u8,
     prefix: ?[]const u8,
 ) !void {
@@ -702,7 +721,6 @@ fn parseMTREE(
     while (try reader.nextEntry()) |entry| {
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
         if (std.mem.startsWith(u8, path, ".")) continue;
-
         if (std.fs.path.isAbsolute(path)) return error.AbsolutePathInMTREE;
 
         const install_path = try std.fs.path.join(self.alloc, &.{
@@ -715,5 +733,54 @@ fn parseMTREE(
         const ret = archive.c.archive_write_header(writer, entry);
         if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
         _ = archive.c.archive_write_finish_entry(writer);
+
+        try insert(txn, self.file_lkp, key, install_path);
+        try insert(txn, self.files_db, install_path, key);
     }
+}
+
+pub fn uninstall(
+    self: *Db,
+    txn: *c.MDB_txn,
+    pkg: c.MDB_val,
+) !void {
+    const name = @as([*]const u8, @ptrCast(pkg.mv_data))[0..pkg.mv_size];
+    const pkg_files = try self.queryLkpRepo(
+        txn,
+        self.file_lkp,
+        name,
+    );
+    defer self.alloc.free(pkg_files);
+
+    for (pkg_files) |f| {
+        const path = @as([*]const u8, @ptrCast(f.mv_data))[0..f.mv_size];
+        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+            error.IsDir => try std.fs.cwd().deleteDir(path),
+            error.FileNotFound => {},
+            else => return err,
+        };
+        const ret = c.mdb_del(
+            txn,
+            self.files_db,
+            &f,
+            null,
+        );
+        if (ret != c.MDB_NOTFOUND) try checkCode(ret);
+    }
+
+    var ret = c.mdb_del(
+        txn,
+        self.file_lkp,
+        &pkg,
+        null,
+    );
+    if (ret != c.MDB_NOTFOUND) try checkCode(ret);
+
+    ret = c.mdb_del(
+        txn,
+        self.installed_db,
+        &pkg,
+        null,
+    );
+    if (ret != c.MDB_NOTFOUND) try checkCode(ret);
 }
