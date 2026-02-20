@@ -29,10 +29,22 @@ pub fn init(
         _ = mirror_file.streamDelimiter(&mirrors_writer.writer, '\n') catch |err| {
             if (err == error.EndOfStream) break else return err;
         };
+        if (mirrors_writer.written().len <= 0) continue;
+        if (mirrors_writer.written().len >= 1 and mirrors_writer.written()[0] == '#') continue;
+
+        if (std.mem.indexOfScalar(u8, mirrors_writer.written(), '=')) |eql| {
+            const mirror = std.mem.trim(
+                u8,
+                mirrors_writer.written()[eql + 1 .. mirrors_writer.written().len],
+                " \r\t",
+            );
+            try mirrors.append(
+                alloc,
+                try alloc.dupe(u8, mirror),
+            );
+        }
 
         _ = mirror_file.toss(1);
-        const mirror = try alloc.dupe(u8, mirrors_writer.written());
-        try mirrors.append(alloc, mirror);
         mirrors_writer.clearRetainingCapacity();
     }
 
