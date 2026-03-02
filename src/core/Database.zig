@@ -29,7 +29,6 @@ pub fn mdbVal(bytes: []const u8) c.MDB_val {
 
 pub fn makeKey(
     alloc: std.mem.Allocator,
-    // buf: []u8,
     repo: []const u8,
     name: []const u8,
 ) []const u8 {
@@ -235,14 +234,13 @@ pub fn insertPkg(
         w += field.len;
     }
 
-    // var key_buf: [256]u8 = undefined;
-    var key = mdbVal(makeKey(
+    const key_str = makeKey(
         alloc,
-        // &key_buf,
         repo,
         pkg_name,
-    ));
-    defer alloc.free(key);
+    );
+    defer alloc.free(key_str);
+    var key = mdbVal(key_str);
     var val = mdbVal(buf[0..w]);
 
     try checkCode(c.mdb_put(
@@ -254,7 +252,7 @@ pub fn insertPkg(
     ));
 }
 
-pub fn readPkg(val: c.MDB_val) Pkg {
+pub fn readPkg(alloc: std.mem.Allocator, val: c.MDB_val) !Pkg {
     const raw = @as([*]const u8, @ptrCast(val.mv_data));
     if (val.mv_size < @sizeOf(Pkg.Header)) return error.CorruptPkg;
 
@@ -264,25 +262,43 @@ pub fn readPkg(val: c.MDB_val) Pkg {
         raw[0..@sizeOf(Pkg.Header)],
     );
 
+    const expected = @sizeOf(Pkg.Header) +
+        header.version_len +
+        header.description_len +
+        header.arch_len +
+        header.license_len +
+        header.filename_len +
+        header.packager_len +
+        header.checksum_len +
+        header.signature_len +
+        header.replaces_len +
+        header.conflicts_len +
+        header.provides_len +
+        header.deps_len +
+        header.mkdeps_len +
+        header.optdeps_len +
+        header.checkdeps_len;
+    if (expected > val.mv_size) return error.CorruptPkg;
+
     var ptr: usize = @sizeOf(Pkg.Header);
     return .{
         .build_date = header.build_date,
 
-        .version = Pkg.Header.nextField(raw, header.version_len, &ptr),
-        .description = Pkg.Header.nextField(raw, header.description_len, &ptr),
-        .arch = Pkg.Header.nextField(raw, header.arch_len, &ptr),
-        .license = Pkg.Header.nextField(raw, header.license_len, &ptr),
-        .filename = Pkg.Header.nextField(raw, header.filename_len, &ptr),
-        .packager = Pkg.Header.nextField(raw, header.packager_len, &ptr),
-        .checksum = Pkg.Header.nextField(raw, header.checksum_len, &ptr),
-        .signature = Pkg.Header.nextField(raw, header.signature_len, &ptr),
-        .replaces = Pkg.Header.nextField(raw, header.replaces_len, &ptr),
-        .conflicts = Pkg.Header.nextField(raw, header.conflicts_len, &ptr),
-        .provides = Pkg.Header.nextField(raw, header.provides_len, &ptr),
-        .deps = Pkg.Header.nextField(raw, header.deps_len, &ptr),
-        .mkdeps = Pkg.Header.nextField(raw, header.mkdeps_len, &ptr),
-        .optdeps = Pkg.Header.nextField(raw, header.optdeps_len, &ptr),
-        .checkdeps = Pkg.Header.nextField(raw, header.checkdeps_len, &ptr),
+        .version = alloc.dupe(u8, Pkg.Header.nextField(raw, header.version_len, &ptr)),
+        .description = alloc.dupe(u8, Pkg.Header.nextField(raw, header.description_len, &ptr)),
+        .arch = alloc.dupe(u8, Pkg.Header.nextField(raw, header.arch_len, &ptr)),
+        .license = alloc.dupe(u8, Pkg.Header.nextField(raw, header.license_len, &ptr)),
+        .filename = alloc.dupe(u8, Pkg.Header.nextField(raw, header.filename_len, &ptr)),
+        .packager = alloc.dupe(u8, Pkg.Header.nextField(raw, header.packager_len, &ptr)),
+        .checksum = alloc.dupe(u8, Pkg.Header.nextField(raw, header.checksum_len, &ptr)),
+        .signature = alloc.dupe(u8, Pkg.Header.nextField(raw, header.signature_len, &ptr)),
+        .replaces = alloc.dupe(u8, Pkg.Header.nextField(raw, header.replaces_len, &ptr)),
+        .conflicts = alloc.dupe(u8, Pkg.Header.nextField(raw, header.conflicts_len, &ptr)),
+        .provides = alloc.dupe(u8, Pkg.Header.nextField(raw, header.provides_len, &ptr)),
+        .deps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.deps_len, &ptr)),
+        .mkdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.mkdeps_len, &ptr)),
+        .optdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.optdeps_len, &ptr)),
+        .checkdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.checkdeps_len, &ptr)),
     };
 }
 
@@ -291,34 +307,40 @@ pub fn queryLkpRepo(
     txn: *c.MDB_txn,
     dbi: c.MDB_dbi,
     name: []const u8,
-) ![]c.MDB_val {
+) ![][]u8 {
     var cursor: ?*c.MDB_cursor = null;
     try checkCode(
         c.mdb_cursor_open(txn, dbi, &cursor),
     );
     defer c.mdb_cursor_close(cursor);
 
-    var pkgs: std.ArrayList(c.MDB_val) = .empty;
+    var pkgs: std.ArrayList([]u8) = .empty;
     defer pkgs.deinit(self.alloc);
 
     var key: c.MDB_val = mdbVal(name);
-    var val: c.MDB_val = undefined;
+    var mdb_val: c.MDB_val = undefined;
 
-    try checkCode(c.mdb_cursor_get(
+    var ret = c.mdb_cursor_get(
         cursor.?,
         &key,
-        &val,
+        &mdb_val,
         c.MDB_SET,
-    ));
+    );
+    if (ret == c.MDB_NOTFOUND) return &[_]u8{};
+    try checkCode(ret);
 
-    var ret: c_int = 0;
     while (ret == 0) {
-        try pkgs.append(self.alloc, self.alloc.dupe(c.MDB_val, val));
+        const data = @as([*]const u8, @ptrCast(mdb_val.mv_data))[0..mdb_val.mv_size];
+        const val = try self.alloc.dupe(u8, data);
+        try pkgs.append(
+            self.alloc,
+            val,
+        );
 
         ret = c.mdb_cursor_get(
             cursor.?,
             &key,
-            &val,
+            &mdb_val,
             c.MDB_NEXT_DUP,
         );
     }
@@ -326,25 +348,17 @@ pub fn queryLkpRepo(
     return pkgs.toOwnedSlice(self.alloc);
 }
 
-pub fn queryPkg(self: *Db, txn: *c.MDB_txn, key: *c.MDB_val) !Pkg {
-    var cursor: ?*c.MDB_cursor = null;
-    try checkCode(c.mdb_cursor_open(
+pub fn queryPkg(self: *Db, alloc: std.mem.Allocator, txn: *c.MDB_txn, key: []const u8) !Pkg {
+    var val: c.MDB_val = undefined;
+    const mdb_key = mdbVal(key);
+    try checkCode(c.mdb_get(
         txn,
         self.pkgs_db,
-        &cursor,
-    ));
-    defer c.mdb_cursor_close(cursor);
-
-    var val: c.MDB_val = undefined;
-
-    try checkCode(c.mdb_cursor_get(
-        cursor.?,
-        key,
+        &mdb_key,
         &val,
-        c.MDB_SET,
     ));
 
-    return readPkg(val);
+    return try readPkg(alloc, val);
 }
 
 pub fn insertInstalledPkg(
@@ -412,49 +426,57 @@ pub fn insertInstalledPkg(
     ));
 }
 
-pub fn readInstalledPkg(val: c.MDB_val) Pkg.Installed {
+pub fn readInstalledPkg(alloc: std.mem.Allocator, val: c.MDB_val) !Pkg.Installed {
     const raw = @as([*]const u8, @ptrCast(val.mv_data));
+    if (val.mv_size < @sizeOf(Pkg.Installed.Header)) return error.CorruptPkg;
 
     var header: Pkg.Installed.Header = undefined;
     @memcpy(
         std.mem.asBytes(&header),
         raw[0..@sizeOf(Pkg.Installed.Header)],
     );
+    const expected = @sizeOf(Pkg.Installed.Header) +
+        header.version_len +
+        header.description_len +
+        header.url_len +
+        header.arch_len +
+        header.license_len +
+        header.packager_len +
+        header.deps_len +
+        header.optdeps_len;
+    if (expected > val.mv_size) return error.CorruptPkg;
 
     var ptr: usize = @sizeOf(Pkg.Installed.Header);
     return .{
         .build_date = header.build_date,
 
-        .version = Pkg.Installed.Header.nextField(raw, header.version_len, &ptr),
-        .description = Pkg.Installed.Header.nextField(raw, header.description_len, &ptr),
-        .url = Pkg.Installed.Header.nextField(raw, header.url_len, &ptr),
-        .arch = Pkg.Installed.Header.nextField(raw, header.arch_len, &ptr),
-        .license = Pkg.Installed.Header.nextField(raw, header.license_len, &ptr),
-        .packager = Pkg.Installed.Header.nextField(raw, header.packager_len, &ptr),
-        .deps = Pkg.Installed.Header.nextField(raw, header.deps_len, &ptr),
-        .optdeps = Pkg.Installed.Header.nextField(raw, header.optdeps_len, &ptr),
+        .version = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.version_len, &ptr)),
+        .description = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.description_len, &ptr)),
+        .url = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.url_len, &ptr)),
+        .arch = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.arch_len, &ptr)),
+        .license = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.license_len, &ptr)),
+        .packager = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.packager_len, &ptr)),
+        .deps = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.deps_len, &ptr)),
+        .optdeps = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.optdeps_len, &ptr)),
     };
 }
 
-pub fn queryInstalledPkg(self: *Db, txn: *c.MDB_txn, key: *c.MDB_val) !Pkg.Installed {
-    var cursor: ?*c.MDB_cursor = null;
-    try checkCode(c.mdb_cursor_open(
+pub fn queryInstalledPkg(
+    self: *Db,
+    alloc: std.mem.Allocator,
+    txn: *c.MDB_txn,
+    key: []const u8,
+) !Pkg.Installed {
+    var val: c.MDB_val = undefined;
+    const mdb_key = mdbVal(key);
+    try checkCode(c.mdb_get(
         txn,
         self.installed_db,
-        &cursor,
-    ));
-    defer c.mdb_cursor_close(cursor);
-
-    var val: c.MDB_val = undefined;
-
-    try checkCode(c.mdb_cursor_get(
-        cursor.?,
-        key,
+        &mdb_key,
         &val,
-        c.MDB_SET,
     ));
 
-    return readInstalledPkg(val);
+    return try readInstalledPkg(alloc, val);
 }
 
 pub fn sync(
@@ -466,6 +488,11 @@ pub fn sync(
     batch_size: usize,
     download_cb: ?*const Downloader.callback,
 ) !void {
+    var batched: usize = 0;
+    var txn: ?*c.MDB_txn = null;
+
+    errdefer if (txn) |t| c.mdb_txn_abort(t);
+
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
@@ -488,10 +515,6 @@ pub fn sync(
         download_cb,
     );
 
-    var in_trans: bool = false;
-    var batched: usize = 0;
-    var txn: ?*c.MDB_txn = null;
-
     const file = try std.fs.cwd().openFile(
         dest,
         .{ .mode = .read_only },
@@ -499,7 +522,6 @@ pub fn sync(
     defer file.close();
 
     try reader.openFd(file.handle);
-    var pkg_key: ?[]const u8 = null;
     var buf: [8192]u8 = undefined;
     while (try reader.nextEntry()) |entry| {
         const pathrepo: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
@@ -533,22 +555,21 @@ pub fn sync(
         }
 
         if (is_desc) {
-            if (batched >= batch_size and in_trans) {
+            if (batched >= batch_size and txn != null) {
                 try checkCode(c.mdb_txn_commit(txn.?));
-                in_trans = false;
                 batched = 0;
+                txn = null;
             }
-            if (!in_trans) {
+            if (txn == null) {
                 try checkCode(c.mdb_txn_begin(
                     self.env,
                     null,
                     0,
                     &txn,
                 ));
-                in_trans = true;
             }
 
-            pkg_key = try desc.index(
+            try desc.index(
                 self.alloc,
                 self,
                 txn.?,
@@ -558,11 +579,9 @@ pub fn sync(
 
             batched += 1;
         }
-
-        content.clearRetainingCapacity();
     }
 
-    if (in_trans) {
+    if (txn != null) {
         try checkCode(c.mdb_txn_commit(txn.?));
     }
 }
@@ -609,6 +628,17 @@ pub fn install(
     defer self.alloc.free(cache);
     try std.fs.cwd().makePath(cache);
 
+    const tmp_path = try std.fs.path.join(self.alloc, &.{
+        prefix orelse "/",
+        "tmp",
+        if (std.mem.indexOf(u8, pkg.filename, ".pkg.tar.")) |i|
+            pkg.filename[0..i]
+        else
+            pkg.checksum,
+    });
+    defer self.alloc.free(tmp_path);
+    try std.fs.cwd().makePath(tmp_path);
+
     const dest = try std.fs.path.join(self.alloc, &.{
         cache,
         pkg.filename,
@@ -635,19 +665,21 @@ pub fn install(
         if (std.fs.path.isAbsolute(path)) return error.AbsolutePathInPkg;
 
         const path_type = archive.c.archive_entry_mode(entry) & 0o170000;
-        const install_path = if (std.mem.startsWith(u8, path, "."))
+        const tmp_install_path = if (path.len > 0 and path[0] == '.' and
+            !std.mem.startsWith(u8, path, "./") and
+            !std.mem.startsWith(u8, path, "../"))
             try std.fs.path.join(self.alloc, &.{
                 cache,
                 path,
             })
         else
             try std.fs.path.join(self.alloc, &.{
-                prefix orelse "/",
+                tmp_path,
                 path,
             });
-        defer self.alloc.free(install_path);
+        defer self.alloc.free(tmp_install_path);
 
-        archive.c.archive_entry_set_pathname(entry, install_path.ptr);
+        archive.c.archive_entry_set_pathname(entry, tmp_install_path.ptr);
         const ret = archive.c.archive_write_header(writer, entry);
         if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
 
@@ -667,6 +699,16 @@ pub fn install(
         _ = archive.c.archive_write_finish_entry(writer);
     }
 
+    const tmp_dir = try std.fs.cwd().openDir(tmp_path, .{
+        .iterate = true,
+    });
+    defer tmp_dir.close();
+    try moveTree(
+        self.alloc,
+        tmp_dir,
+        prefix orelse "/",
+    );
+
     const mtree_path = try std.fs.path.join(self.alloc, &.{
         cache,
         ".MTREE",
@@ -679,6 +721,40 @@ pub fn install(
         mtree_path,
         prefix,
     );
+}
+
+fn moveTree(alloc: std.mem.Allocator, src: std.fs.Dir, dest: []const u8) !void {
+    var it = src.iterate();
+    while (try it.next()) |entry| {
+        const src_path = entry.name;
+        const dest_path = try std.fs.path.join(alloc, &.{
+            dest,
+            src_path,
+        });
+        defer alloc.free(dest_path);
+
+        switch (entry.kind) {
+            .directory => {
+                try std.fs.cwd().makePath(dest_path);
+                const child = try src.openDir(src_path, .{
+                    .iterate = true,
+                });
+                defer child.close();
+
+                try moveTree(
+                    alloc,
+                    child,
+                    dest_path,
+                );
+            },
+            else => {
+                try src.rename(
+                    src_path,
+                    dest_path,
+                );
+            },
+        }
+    }
 }
 
 fn parseMTREE(
@@ -750,19 +826,23 @@ pub fn uninstall(
         self.file_lkp,
         name,
     );
-    defer self.alloc.free(pkg_files);
+    defer {
+        for (pkg_files) |f| {
+            self.alloc.free(f);
+        }
+        self.alloc.free(pkg_files);
+    }
 
-    for (pkg_files) |f| {
-        const path = @as([*]const u8, @ptrCast(f.mv_data))[0..f.mv_size];
+    for (pkg_files) |path| {
         std.fs.cwd().deleteFile(path) catch |err| switch (err) {
-            error.IsDir => try std.fs.cwd().deleteDir(path),
+            error.IsDir => try std.fs.cwd().deleteTree(path),
             error.FileNotFound => {},
             else => return err,
         };
         const ret = c.mdb_del(
             txn,
             self.files_db,
-            &f,
+            &mdbVal(path),
             null,
         );
         if (ret != c.MDB_NOTFOUND) try checkCode(ret);
