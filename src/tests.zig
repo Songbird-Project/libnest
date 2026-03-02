@@ -8,10 +8,13 @@ const MIRRORS: []const u8 = "./tests/mirrors";
 
 fn cb(dlnow: f64, dltotal: f64) !void {
     const bar_width: usize = 10;
-    const filled: u8 = @min(bar_width, @as(u8, @intFromFloat((dlnow / dltotal) * 10)));
+    const filled: u8 = if (dltotal == 0)
+        0
+    else
+        @min(bar_width, @as(u8, @intFromFloat((dlnow / dltotal) * 10)));
 
     var bar: [bar_width]u8 = undefined;
-    @memset(bar[0..filled], '#');
+    if (filled > 0) @memset(bar[0..filled], '#');
     @memset(bar[filled..], ' ');
 
     std.debug.print("\r[{s}]", .{bar});
@@ -42,37 +45,6 @@ test "Sync Mirrors" {
     }
 }
 
-// test "Package Download" {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     defer _ = gpa.deinit();
-//     const alloc = gpa.allocator();
-//
-//     var db = try Db.init(alloc, PKG_DB);
-//     defer db.deinit();
-//
-//     var mirrors = try MirrorList.init(alloc, MIRRORS);
-//     defer mirrors.deinit();
-//
-//     const txn = try db.newTxn();
-//     const pkgs = try db.queryPkgRepo(
-//         txn,
-//         "binutils",
-//     );
-//     defer alloc.free(pkgs);
-//     if (pkgs.len > 1) {
-//         @panic("unhandled :/");
-//     }
-//
-//     const pkg = try db.queryPkg(txn, &pkgs[0]);
-//
-//     try mirrors.downloadPkg(
-//         pkgs[0],
-//         pkg,
-//         "./tests/binutils.pkg.tar.zst",
-//         &cb,
-//     );
-// }
-
 test "Package Install" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -92,10 +64,11 @@ test "Package Install" {
     );
     defer alloc.free(pkgs);
     if (pkgs.len > 1) {
-        @panic("unhandled :/");
+        @panic("TODO: Handle more than 1 pkg");
     }
 
-    const pkg = try db.queryPkg(txn, &pkgs[0]);
+    const pkg = try db.queryPkg(alloc, txn, pkgs[0]);
+    defer alloc.free(pkg);
     try db.install(
         &mirrors,
         pkgs[0],
