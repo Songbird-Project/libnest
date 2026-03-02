@@ -8,7 +8,7 @@ pub fn index(
     txn: *Db.c.MDB_txn,
     desc: []const u8,
     repo: []const u8,
-) ![]const u8 {
+) !void {
     var fields: std.StringHashMap([]const u8) = try parse(alloc, desc);
     defer {
         var it = fields.keyIterator();
@@ -38,10 +38,8 @@ pub fn index(
         .checkdeps = fields.get("CHECKDEPENDS") orelse "[]",
     };
 
-    // var buf: [256]u8 = undefined;
     const key = Db.makeKey(
         alloc,
-        // &buf,
         repo,
         fields.get("NAME") orelse unreachable,
     );
@@ -60,8 +58,6 @@ pub fn index(
         fields.get("NAME") orelse unreachable,
         key,
     );
-
-    return key;
 }
 
 pub fn parse(alloc: std.mem.Allocator, src: []const u8) !std.StringHashMap([]const u8) {
