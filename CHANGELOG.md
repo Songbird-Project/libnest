@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Small `libarchive` bindings for Arch Linux database indexing
 - LMDB-based indexing for packages and files
-- Small `libcurl` bindings for downloading databases
+- Small `libcurl` bindings
+- Small `libarchive` bindings
+- Small `lmdb` bindings
 - `desc` and `.PKGINFO` file parser to extract package info
 - BSD-3-Clause license
 - `CHANGELOG.md` for version tracking
