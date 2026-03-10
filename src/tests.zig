@@ -1,7 +1,11 @@
 const std = @import("std");
+const mdb = @import("utils/mdb.zig");
 
 const MirrorList = @import("net/MirrorList.zig");
 const Db = @import("core/Database.zig");
+const AUR = struct {
+    pub const Client = @import("aur/Client.zig");
+};
 
 const PKG_DB: []const u8 = "./tests/pkgs.db";
 const MIRRORS: []const u8 = "./tests/mirrors";
@@ -18,6 +22,28 @@ fn cb(dlnow: f64, dltotal: f64) !void {
     @memset(bar[filled..], ' ');
 
     std.debug.print("\r[{s}]", .{bar});
+}
+
+test "AUR Query" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var aur_client = try AUR.Client.init(alloc);
+    defer aur_client.deinit();
+    const json_res = try aur_client.search("balatro", .NameDesc);
+    defer json_res.deinit();
+    const res = json_res.value;
+
+    for (res.results) |result| {
+        std.debug.print(
+            "Name => {s}\nDesc => {s}\n\n",
+            .{
+                result.Name,
+                result.Description orelse "No description provided.",
+            },
+        );
+    }
 }
 
 test "Sync Mirrors" {
@@ -56,7 +82,7 @@ test "Package Install" {
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
-    const txn = try db.startTxn();
+    const txn = try mdb.startTxn();
     const pkgs = try db.queryLkpRepo(
         txn,
         db.pkg_lkp,
@@ -77,5 +103,5 @@ test "Package Install" {
         "./tests",
         &cb,
     );
-    try Db.endTxn(txn);
+    try mdb.endTxn(txn);
 }
