@@ -9,35 +9,7 @@ const Pkg = @import("Package.zig");
 
 const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
-
-pub fn checkCode(code: c_int) !void {
-    if (code != 0) {
-        std.debug.print(
-            "LMDB ERROR: {s}\n",
-            .{c.mdb_strerror(code)},
-        );
-        return error.Internal;
-    }
-}
-
-pub fn mdbVal(bytes: []const u8) c.MDB_val {
-    return .{
-        .mv_size = bytes.len,
-        .mv_data = @constCast(bytes.ptr),
-    };
-}
-
-pub fn makeKey(
-    alloc: std.mem.Allocator,
-    repo: []const u8,
-    name: []const u8,
-) []const u8 {
-    // @memmove(buf[0..name.len], name);
-    // buf[name.len] = 0;
-    // @memmove(buf[name.len + 1 ..][0..repo.len], repo);
-    // return buf[0 .. name.len + repo.len + 1];
-    return std.mem.concat(alloc, u8, &.{ name, "\x00", repo });
-}
+const mdb = @import("../utils/mdb.zig");
 
 const Db = @This();
 
@@ -51,13 +23,13 @@ pkg_lkp: c.MDB_dbi,
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
     var env: ?*c.MDB_env = null;
-    try checkCode(c.mdb_env_create(&env));
+    try mdb.checkCode(c.mdb_env_create(&env));
     errdefer c.mdb_env_close(env.?);
 
-    try checkCode(c.mdb_env_set_maxdbs(env.?, 7));
-    try checkCode(c.mdb_env_set_mapsize(env.?, 5 * 1024 * 1024 * 1024));
+    try mdb.checkCode(c.mdb_env_set_maxdbs(env.?, 7));
+    try mdb.checkCode(c.mdb_env_set_mapsize(env.?, 5 * 1024 * 1024 * 1024));
 
-    try checkCode(c.mdb_env_open(
+    try mdb.checkCode(c.mdb_env_open(
         env.?,
         path.ptr,
         c.MDB_NOSUBDIR,
@@ -65,7 +37,7 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
     ));
 
     var txn: ?*c.MDB_txn = undefined;
-    try checkCode(c.mdb_txn_begin(env.?, null, 0, &txn));
+    try mdb.checkCode(c.mdb_txn_begin(env.?, null, 0, &txn));
 
     var pkgs_db: c.MDB_dbi = undefined;
     var files_db: c.MDB_dbi = undefined;
@@ -73,38 +45,38 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
     var pkg_lkp: c.MDB_dbi = undefined;
     var file_lkp: c.MDB_dbi = undefined;
 
-    try checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(c.mdb_dbi_open(
         txn.?,
         "packages",
         c.MDB_CREATE,
         &pkgs_db,
     ));
-    try checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(c.mdb_dbi_open(
         txn.?,
         "files",
         c.MDB_CREATE,
         &files_db,
     ));
-    try checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(c.mdb_dbi_open(
         txn.?,
         "installed",
         c.MDB_CREATE,
         &installed_db,
     ));
-    try checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(c.mdb_dbi_open(
         txn.?,
         "package_lookup",
         c.MDB_CREATE | c.MDB_DUPSORT,
         &pkg_lkp,
     ));
-    try checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(c.mdb_dbi_open(
         txn.?,
         "file_lookup",
         c.MDB_CREATE | c.MDB_DUPSORT,
         &file_lkp,
     ));
 
-    try checkCode(c.mdb_txn_commit(txn.?));
+    try mdb.checkCode(c.mdb_txn_commit(txn.?));
 
     return .{
         .alloc = alloc,
@@ -125,10 +97,11 @@ pub fn deinit(self: *Db) void {
     c.mdb_dbi_close(self.env, self.file_lkp);
     c.mdb_env_close(self.env);
 }
-pub fn startTxn(self: *Db) !*c.MDB_txn {
+
+pub fn startTxn(db: *Db) !*c.MDB_txn {
     var txn: ?*c.MDB_txn = null;
-    try checkCode(c.mdb_txn_begin(
-        self.env,
+    try mdb.checkCode(c.mdb_txn_begin(
+        db.env,
         null,
         0,
         &txn,
@@ -138,7 +111,7 @@ pub fn startTxn(self: *Db) !*c.MDB_txn {
 }
 
 pub fn endTxn(txn: *c.MDB_txn) !void {
-    try checkCode(c.mdb_txn_commit(txn));
+    try mdb.checkCode(c.mdb_txn_commit(txn));
 }
 
 pub fn insert(
@@ -147,10 +120,10 @@ pub fn insert(
     key: []const u8,
     value: []const u8,
 ) !void {
-    var mdb_key = mdbVal(key);
-    var val = mdbVal(value);
+    var mdb_key = mdb.mdbVal(key);
+    var val = mdb.mdbVal(value);
 
-    try checkCode(c.mdb_put(
+    try mdb.checkCode(c.mdb_put(
         txn,
         dbi,
         &mdb_key,
@@ -234,16 +207,16 @@ pub fn insertPkg(
         w += field.len;
     }
 
-    const key_str = makeKey(
+    const key_str = mdb.makeKey(
         alloc,
         repo,
         pkg_name,
     );
     defer alloc.free(key_str);
-    var key = mdbVal(key_str);
-    var val = mdbVal(buf[0..w]);
+    var key = mdb.mdbVal(key_str);
+    var val = mdb.mdbVal(buf[0..w]);
 
-    try checkCode(c.mdb_put(
+    try mdb.checkCode(c.mdb_put(
         txn,
         dbi,
         &key,
@@ -309,7 +282,7 @@ pub fn queryLkpRepo(
     name: []const u8,
 ) ![][]u8 {
     var cursor: ?*c.MDB_cursor = null;
-    try checkCode(
+    try mdb.checkCode(
         c.mdb_cursor_open(txn, dbi, &cursor),
     );
     defer c.mdb_cursor_close(cursor);
@@ -317,19 +290,20 @@ pub fn queryLkpRepo(
     var pkgs: std.ArrayList([]u8) = .empty;
     defer pkgs.deinit(self.alloc);
 
-    var key: c.MDB_val = mdbVal(name);
+    var key: c.MDB_val = mdb.mdbVal(name);
     var mdb_val: c.MDB_val = undefined;
 
-    var ret = c.mdb_cursor_get(
+    mdb.checkCode(c.mdb_cursor_get(
         cursor.?,
         &key,
         &mdb_val,
         c.MDB_SET,
-    );
-    if (ret == c.MDB_NOTFOUND) return &[_]u8{};
-    try checkCode(ret);
+    )) catch |err| switch (err) {
+        error.NotFound => return &[_]u8{},
+        else => {},
+    };
 
-    while (ret == 0) {
+    while (true) {
         const data = @as([*]const u8, @ptrCast(mdb_val.mv_data))[0..mdb_val.mv_size];
         const val = try self.alloc.dupe(u8, data);
         try pkgs.append(
@@ -337,12 +311,15 @@ pub fn queryLkpRepo(
             val,
         );
 
-        ret = c.mdb_cursor_get(
+        mdb.checkCode(c.mdb_cursor_get(
             cursor.?,
             &key,
             &mdb_val,
             c.MDB_NEXT_DUP,
-        );
+        )) catch |err| switch (err) {
+            error.Success => {},
+            else => break,
+        };
     }
 
     return pkgs.toOwnedSlice(self.alloc);
@@ -350,8 +327,8 @@ pub fn queryLkpRepo(
 
 pub fn queryPkg(self: *Db, alloc: std.mem.Allocator, txn: *c.MDB_txn, key: []const u8) !Pkg {
     var val: c.MDB_val = undefined;
-    const mdb_key = mdbVal(key);
-    try checkCode(c.mdb_get(
+    const mdb_key = mdb.mdbVal(key);
+    try mdb.checkCode(c.mdb_get(
         txn,
         self.pkgs_db,
         &mdb_key,
@@ -415,9 +392,9 @@ pub fn insertInstalledPkg(
         w += field.len;
     }
 
-    var val = mdbVal(buf[0..w]);
+    var val = mdb.mdbVal(buf[0..w]);
 
-    try checkCode(c.mdb_put(
+    try mdb.checkCode(c.mdb_put(
         txn,
         dbi,
         &key,
@@ -468,8 +445,8 @@ pub fn queryInstalledPkg(
     key: []const u8,
 ) !Pkg.Installed {
     var val: c.MDB_val = undefined;
-    const mdb_key = mdbVal(key);
-    try checkCode(c.mdb_get(
+    const mdb_key = mdb.mdbVal(key);
+    try mdb.checkCode(c.mdb_get(
         txn,
         self.installed_db,
         &mdb_key,
@@ -556,12 +533,12 @@ pub fn sync(
 
         if (is_desc) {
             if (batched >= batch_size and txn != null) {
-                try checkCode(c.mdb_txn_commit(txn.?));
+                try mdb.checkCode(c.mdb_txn_commit(txn.?));
                 batched = 0;
                 txn = null;
             }
             if (txn == null) {
-                try checkCode(c.mdb_txn_begin(
+                try mdb.checkCode(c.mdb_txn_begin(
                     self.env,
                     null,
                     0,
@@ -582,7 +559,7 @@ pub fn sync(
     }
 
     if (txn != null) {
-        try checkCode(c.mdb_txn_commit(txn.?));
+        try mdb.checkCode(c.mdb_txn_commit(txn.?));
     }
 }
 
@@ -839,28 +816,35 @@ pub fn uninstall(
             error.FileNotFound => {},
             else => return err,
         };
-        const ret = c.mdb_del(
+
+        mdb.checkCode(c.mdb_del(
             txn,
             self.files_db,
-            &mdbVal(path),
+            &mdb.mdbVal(path),
             null,
-        );
-        if (ret != c.MDB_NOTFOUND) try checkCode(ret);
+        )) catch |err| switch (err) {
+            error.NotFound => {},
+            else => return err,
+        };
     }
 
-    var ret = c.mdb_del(
+    mdb.checkCode(c.mdb_del(
         txn,
         self.file_lkp,
         &pkg,
         null,
-    );
-    if (ret != c.MDB_NOTFOUND) try checkCode(ret);
+    )) catch |err| switch (err) {
+        error.NotFound => {},
+        else => return err,
+    };
 
-    ret = c.mdb_del(
+    mdb.checkCode(c.mdb_del(
         txn,
         self.installed_db,
         &pkg,
         null,
-    );
-    if (ret != c.MDB_NOTFOUND) try checkCode(ret);
+    )) catch |err| switch (err) {
+        error.NotFound => {},
+        else => return err,
+    };
 }
