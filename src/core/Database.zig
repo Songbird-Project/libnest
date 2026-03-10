@@ -1,7 +1,4 @@
 const std = @import("std");
-pub const c = @cImport({
-    @cInclude("lmdb.h");
-});
 
 const Downloader = @import("../net/Downloader.zig");
 const MirrorList = @import("../net/MirrorList.zig");
@@ -11,72 +8,78 @@ const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
 const mdb = @import("../utils/mdb.zig");
 
+const DbError = error{
+    RelativePathInPkg,
+    RelativePathInMTREE,
+    CorruptPkg,
+} || archive.ArchiveError || mdb.MDBError;
+
 const Db = @This();
 
 alloc: std.mem.Allocator,
-env: *c.MDB_env,
-pkgs_db: c.MDB_dbi,
-files_db: c.MDB_dbi,
-installed_db: c.MDB_dbi,
-file_lkp: c.MDB_dbi,
-pkg_lkp: c.MDB_dbi,
+env: *mdb.c.MDB_env,
+pkgs_db: mdb.c.MDB_dbi,
+files_db: mdb.c.MDB_dbi,
+installed_db: mdb.c.MDB_dbi,
+file_lkp: mdb.c.MDB_dbi,
+pkg_lkp: mdb.c.MDB_dbi,
 
-pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
-    var env: ?*c.MDB_env = null;
-    try mdb.checkCode(c.mdb_env_create(&env));
-    errdefer c.mdb_env_close(env.?);
+pub fn init(alloc: std.mem.Allocator, path: []const u8) DbError!Db {
+    var env: ?*mdb.c.MDB_env = null;
+    try mdb.checkCode(mdb.c.mdb_env_create(&env));
+    errdefer mdb.c.mdb_env_close(env.?);
 
-    try mdb.checkCode(c.mdb_env_set_maxdbs(env.?, 7));
-    try mdb.checkCode(c.mdb_env_set_mapsize(env.?, 5 * 1024 * 1024 * 1024));
+    try mdb.checkCode(mdb.c.mdb_env_set_maxdbs(env.?, 7));
+    try mdb.checkCode(mdb.c.mdb_env_set_mapsize(env.?, 5 * 1024 * 1024 * 1024));
 
-    try mdb.checkCode(c.mdb_env_open(
+    try mdb.checkCode(mdb.c.mdb_env_open(
         env.?,
         path.ptr,
-        c.MDB_NOSUBDIR,
+        mdb.c.MDB_NOSUBDIR,
         0o644,
     ));
 
-    var txn: ?*c.MDB_txn = undefined;
-    try mdb.checkCode(c.mdb_txn_begin(env.?, null, 0, &txn));
+    var txn: ?*mdb.c.MDB_txn = undefined;
+    try mdb.checkCode(mdb.c.mdb_txn_begin(env.?, null, 0, &txn));
 
-    var pkgs_db: c.MDB_dbi = undefined;
-    var files_db: c.MDB_dbi = undefined;
-    var installed_db: c.MDB_dbi = undefined;
-    var pkg_lkp: c.MDB_dbi = undefined;
-    var file_lkp: c.MDB_dbi = undefined;
+    var pkgs_db: mdb.c.MDB_dbi = undefined;
+    var files_db: mdb.c.MDB_dbi = undefined;
+    var installed_db: mdb.c.MDB_dbi = undefined;
+    var pkg_lkp: mdb.c.MDB_dbi = undefined;
+    var file_lkp: mdb.c.MDB_dbi = undefined;
 
-    try mdb.checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(mdb.c.mdb_dbi_open(
         txn.?,
         "packages",
-        c.MDB_CREATE,
+        mdb.c.MDB_CREATE,
         &pkgs_db,
     ));
-    try mdb.checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(mdb.c.mdb_dbi_open(
         txn.?,
         "files",
-        c.MDB_CREATE,
+        mdb.c.MDB_CREATE,
         &files_db,
     ));
-    try mdb.checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(mdb.c.mdb_dbi_open(
         txn.?,
         "installed",
-        c.MDB_CREATE,
+        mdb.c.MDB_CREATE,
         &installed_db,
     ));
-    try mdb.checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(mdb.c.mdb_dbi_open(
         txn.?,
         "package_lookup",
-        c.MDB_CREATE | c.MDB_DUPSORT,
+        mdb.c.MDB_CREATE | mdb.c.MDB_DUPSORT,
         &pkg_lkp,
     ));
-    try mdb.checkCode(c.mdb_dbi_open(
+    try mdb.checkCode(mdb.c.mdb_dbi_open(
         txn.?,
         "file_lookup",
-        c.MDB_CREATE | c.MDB_DUPSORT,
+        mdb.c.MDB_CREATE | mdb.c.MDB_DUPSORT,
         &file_lkp,
     ));
 
-    try mdb.checkCode(c.mdb_txn_commit(txn.?));
+    try mdb.checkCode(mdb.c.mdb_txn_commit(txn.?));
 
     return .{
         .alloc = alloc,
@@ -90,214 +93,37 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
 }
 
 pub fn deinit(self: *Db) void {
-    c.mdb_dbi_close(self.env, self.pkgs_db);
-    c.mdb_dbi_close(self.env, self.files_db);
-    c.mdb_dbi_close(self.env, self.installed_db);
-    c.mdb_dbi_close(self.env, self.pkg_lkp);
-    c.mdb_dbi_close(self.env, self.file_lkp);
-    c.mdb_env_close(self.env);
-}
-
-pub fn startTxn(db: *Db) !*c.MDB_txn {
-    var txn: ?*c.MDB_txn = null;
-    try mdb.checkCode(c.mdb_txn_begin(
-        db.env,
-        null,
-        0,
-        &txn,
-    ));
-
-    return txn.?;
-}
-
-pub fn endTxn(txn: *c.MDB_txn) !void {
-    try mdb.checkCode(c.mdb_txn_commit(txn));
-}
-
-pub fn insert(
-    txn: *c.MDB_txn,
-    dbi: c.MDB_dbi,
-    key: []const u8,
-    value: []const u8,
-) !void {
-    var mdb_key = mdb.mdbVal(key);
-    var val = mdb.mdbVal(value);
-
-    try mdb.checkCode(c.mdb_put(
-        txn,
-        dbi,
-        &mdb_key,
-        &val,
-        0,
-    ));
-}
-
-pub fn insertPkg(
-    alloc: std.mem.Allocator,
-    txn: *c.MDB_txn,
-    dbi: c.MDB_dbi,
-    repo: []const u8,
-    pkg_name: []const u8,
-    fields: Pkg,
-) !void {
-    const pkg_len =
-        @sizeOf(Pkg.Header) +
-        fields.version.len +
-        fields.description.len +
-        fields.arch.len +
-        fields.license.len +
-        fields.filename.len +
-        fields.packager.len +
-        fields.checksum.len +
-        fields.signature.len +
-        fields.replaces.len +
-        fields.conflicts.len +
-        fields.provides.len +
-        fields.deps.len +
-        fields.mkdeps.len +
-        fields.optdeps.len +
-        fields.checkdeps.len;
-    var buf = try alloc.alloc(u8, pkg_len);
-    defer alloc.free(buf);
-    var w: usize = 0;
-
-    const header: Pkg.Header = .{
-        .build_date = fields.build_date,
-        .version_len = @intCast(fields.version.len),
-        .description_len = @intCast(fields.description.len),
-        .arch_len = @intCast(fields.arch.len),
-        .license_len = @intCast(fields.license.len),
-        .filename_len = @intCast(fields.filename.len),
-        .packager_len = @intCast(fields.packager.len),
-        .checksum_len = @intCast(fields.checksum.len),
-        .signature_len = @intCast(fields.signature.len),
-        .replaces_len = @intCast(fields.replaces.len),
-        .conflicts_len = @intCast(fields.conflicts.len),
-        .provides_len = @intCast(fields.provides.len),
-        .deps_len = @intCast(fields.deps.len),
-        .mkdeps_len = @intCast(fields.mkdeps.len),
-        .optdeps_len = @intCast(fields.optdeps.len),
-        .checkdeps_len = @intCast(fields.checkdeps.len),
-    };
-
-    @memmove(
-        buf[0..@sizeOf(Pkg.Header)],
-        std.mem.asBytes(&header),
-    );
-    w += @sizeOf(Pkg.Header);
-
-    inline for ([_][]const u8{
-        fields.version,
-        fields.description,
-        fields.arch,
-        fields.license,
-        fields.filename,
-        fields.packager,
-        fields.checksum,
-        fields.signature,
-        fields.replaces,
-        fields.conflicts,
-        fields.provides,
-        fields.deps,
-        fields.mkdeps,
-        fields.optdeps,
-        fields.checkdeps,
-    }) |field| {
-        @memmove(buf[w..][0..field.len], field);
-        w += field.len;
-    }
-
-    const key_str = mdb.makeKey(
-        alloc,
-        repo,
-        pkg_name,
-    );
-    defer alloc.free(key_str);
-    var key = mdb.mdbVal(key_str);
-    var val = mdb.mdbVal(buf[0..w]);
-
-    try mdb.checkCode(c.mdb_put(
-        txn,
-        dbi,
-        &key,
-        &val,
-        0,
-    ));
-}
-
-pub fn readPkg(alloc: std.mem.Allocator, val: c.MDB_val) !Pkg {
-    const raw = @as([*]const u8, @ptrCast(val.mv_data));
-    if (val.mv_size < @sizeOf(Pkg.Header)) return error.CorruptPkg;
-
-    var header: Pkg.Header = undefined;
-    @memcpy(
-        std.mem.asBytes(&header),
-        raw[0..@sizeOf(Pkg.Header)],
-    );
-
-    const expected = @sizeOf(Pkg.Header) +
-        header.version_len +
-        header.description_len +
-        header.arch_len +
-        header.license_len +
-        header.filename_len +
-        header.packager_len +
-        header.checksum_len +
-        header.signature_len +
-        header.replaces_len +
-        header.conflicts_len +
-        header.provides_len +
-        header.deps_len +
-        header.mkdeps_len +
-        header.optdeps_len +
-        header.checkdeps_len;
-    if (expected > val.mv_size) return error.CorruptPkg;
-
-    var ptr: usize = @sizeOf(Pkg.Header);
-    return .{
-        .build_date = header.build_date,
-
-        .version = alloc.dupe(u8, Pkg.Header.nextField(raw, header.version_len, &ptr)),
-        .description = alloc.dupe(u8, Pkg.Header.nextField(raw, header.description_len, &ptr)),
-        .arch = alloc.dupe(u8, Pkg.Header.nextField(raw, header.arch_len, &ptr)),
-        .license = alloc.dupe(u8, Pkg.Header.nextField(raw, header.license_len, &ptr)),
-        .filename = alloc.dupe(u8, Pkg.Header.nextField(raw, header.filename_len, &ptr)),
-        .packager = alloc.dupe(u8, Pkg.Header.nextField(raw, header.packager_len, &ptr)),
-        .checksum = alloc.dupe(u8, Pkg.Header.nextField(raw, header.checksum_len, &ptr)),
-        .signature = alloc.dupe(u8, Pkg.Header.nextField(raw, header.signature_len, &ptr)),
-        .replaces = alloc.dupe(u8, Pkg.Header.nextField(raw, header.replaces_len, &ptr)),
-        .conflicts = alloc.dupe(u8, Pkg.Header.nextField(raw, header.conflicts_len, &ptr)),
-        .provides = alloc.dupe(u8, Pkg.Header.nextField(raw, header.provides_len, &ptr)),
-        .deps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.deps_len, &ptr)),
-        .mkdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.mkdeps_len, &ptr)),
-        .optdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.optdeps_len, &ptr)),
-        .checkdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.checkdeps_len, &ptr)),
-    };
+    mdb.c.mdb_dbi_close(self.env, self.pkgs_db);
+    mdb.c.mdb_dbi_close(self.env, self.files_db);
+    mdb.c.mdb_dbi_close(self.env, self.installed_db);
+    mdb.c.mdb_dbi_close(self.env, self.pkg_lkp);
+    mdb.c.mdb_dbi_close(self.env, self.file_lkp);
+    mdb.c.mdb_env_close(self.env);
 }
 
 pub fn queryLkpRepo(
     self: *Db,
-    txn: *c.MDB_txn,
-    dbi: c.MDB_dbi,
+    txn: *mdb.c.MDB_txn,
+    dbi: mdb.c.MDB_dbi,
     name: []const u8,
-) ![][]u8 {
-    var cursor: ?*c.MDB_cursor = null;
+) DbError![][]u8 {
+    var cursor: ?*mdb.c.MDB_cursor = null;
     try mdb.checkCode(
-        c.mdb_cursor_open(txn, dbi, &cursor),
+        mdb.c.mdb_cursor_open(txn, dbi, &cursor),
     );
-    defer c.mdb_cursor_close(cursor);
+    defer mdb.c.mdb_cursor_close(cursor);
 
     var pkgs: std.ArrayList([]u8) = .empty;
     defer pkgs.deinit(self.alloc);
 
-    var key: c.MDB_val = mdb.mdbVal(name);
-    var mdb_val: c.MDB_val = undefined;
+    var key: mdb.c.MDB_val = mdb.mdbVal(name);
+    var mdb_val: mdb.c.MDB_val = undefined;
 
-    mdb.checkCode(c.mdb_cursor_get(
+    mdb.checkCode(mdb.c.mdb_cursor_get(
         cursor.?,
         &key,
         &mdb_val,
-        c.MDB_SET,
+        mdb.c.MDB_SET,
     )) catch |err| switch (err) {
         error.NotFound => return &[_]u8{},
         else => {},
@@ -311,11 +137,11 @@ pub fn queryLkpRepo(
             val,
         );
 
-        mdb.checkCode(c.mdb_cursor_get(
+        mdb.checkCode(mdb.c.mdb_cursor_get(
             cursor.?,
             &key,
             &mdb_val,
-            c.MDB_NEXT_DUP,
+            mdb.c.MDB_NEXT_DUP,
         )) catch |err| switch (err) {
             error.Success => {},
             else => break,
@@ -325,26 +151,26 @@ pub fn queryLkpRepo(
     return pkgs.toOwnedSlice(self.alloc);
 }
 
-pub fn queryPkg(self: *Db, alloc: std.mem.Allocator, txn: *c.MDB_txn, key: []const u8) !Pkg {
-    var val: c.MDB_val = undefined;
+pub fn queryPkg(self: *Db, alloc: std.mem.Allocator, txn: *mdb.c.MDB_txn, key: []const u8) DbError!Pkg {
+    var val: mdb.c.MDB_val = undefined;
     const mdb_key = mdb.mdbVal(key);
-    try mdb.checkCode(c.mdb_get(
+    try mdb.checkCode(mdb.c.mdb_get(
         txn,
         self.pkgs_db,
         &mdb_key,
         &val,
     ));
 
-    return try readPkg(alloc, val);
+    return try mdb.readPkg(alloc, val);
 }
 
 pub fn insertInstalledPkg(
     alloc: std.mem.Allocator,
-    txn: *c.MDB_txn,
-    dbi: c.MDB_dbi,
-    key: c.MDB_val,
+    txn: *mdb.c.MDB_txn,
+    dbi: mdb.c.MDB_dbi,
+    key: mdb.c.MDB_val,
     fields: Pkg.Installed,
-) !void {
+) DbError!void {
     const pkg_len =
         @sizeOf(Pkg.Installed.Header) +
         fields.version.len +
@@ -394,7 +220,7 @@ pub fn insertInstalledPkg(
 
     var val = mdb.mdbVal(buf[0..w]);
 
-    try mdb.checkCode(c.mdb_put(
+    try mdb.checkCode(mdb.c.mdb_put(
         txn,
         dbi,
         &key,
@@ -403,7 +229,7 @@ pub fn insertInstalledPkg(
     ));
 }
 
-pub fn readInstalledPkg(alloc: std.mem.Allocator, val: c.MDB_val) !Pkg.Installed {
+pub fn readInstalledPkg(alloc: std.mem.Allocator, val: mdb.c.MDB_val) DbError!Pkg.Installed {
     const raw = @as([*]const u8, @ptrCast(val.mv_data));
     if (val.mv_size < @sizeOf(Pkg.Installed.Header)) return error.CorruptPkg;
 
@@ -441,12 +267,12 @@ pub fn readInstalledPkg(alloc: std.mem.Allocator, val: c.MDB_val) !Pkg.Installed
 pub fn queryInstalledPkg(
     self: *Db,
     alloc: std.mem.Allocator,
-    txn: *c.MDB_txn,
+    txn: *mdb.c.MDB_txn,
     key: []const u8,
-) !Pkg.Installed {
-    var val: c.MDB_val = undefined;
+) DbError!Pkg.Installed {
+    var val: mdb.c.MDB_val = undefined;
     const mdb_key = mdb.mdbVal(key);
-    try mdb.checkCode(c.mdb_get(
+    try mdb.checkCode(mdb.c.mdb_get(
         txn,
         self.installed_db,
         &mdb_key,
@@ -464,11 +290,11 @@ pub fn sync(
     arch: []const u8,
     batch_size: usize,
     download_cb: ?*const Downloader.callback,
-) !void {
+) DbError!void {
     var batched: usize = 0;
-    var txn: ?*c.MDB_txn = null;
+    var txn: ?*mdb.c.MDB_txn = null;
 
-    errdefer if (txn) |t| c.mdb_txn_abort(t);
+    errdefer if (txn) |t| mdb.c.mdb_txn_abort(t);
 
     var reader = try archive.Reader.init();
     defer reader.deinit();
@@ -501,7 +327,7 @@ pub fn sync(
     try reader.openFd(file.handle);
     var buf: [8192]u8 = undefined;
     while (try reader.nextEntry()) |entry| {
-        const pathrepo: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+        const pathrepo: []const u8 = std.mem.span(archive.mdb.c.archive_entry_pathname(entry));
         const delim = std.mem.lastIndexOfScalar(u8, pathrepo, '/');
 
         if (delim == null) {
@@ -533,12 +359,12 @@ pub fn sync(
 
         if (is_desc) {
             if (batched >= batch_size and txn != null) {
-                try mdb.checkCode(c.mdb_txn_commit(txn.?));
+                try mdb.checkCode(mdb.c.mdb_txn_commit(txn.?));
                 batched = 0;
                 txn = null;
             }
             if (txn == null) {
-                try mdb.checkCode(c.mdb_txn_begin(
+                try mdb.checkCode(mdb.c.mdb_txn_begin(
                     self.env,
                     null,
                     0,
@@ -559,37 +385,24 @@ pub fn sync(
     }
 
     if (txn != null) {
-        try mdb.checkCode(c.mdb_txn_commit(txn.?));
+        try mdb.checkCode(mdb.c.mdb_txn_commit(txn.?));
     }
 }
 
 pub fn install(
     self: *Db,
     mirrors: *MirrorList,
-    key: c.MDB_val,
+    key: mdb.c.MDB_val,
     pkg: Pkg,
-    txn: *c.MDB_txn,
+    txn: *mdb.c.MDB_txn,
     prefix: ?[]const u8,
     download_cb: ?*const Downloader.callback,
-) !void {
+) DbError!void {
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
-    const writer = archive.c.archive_write_disk_new() orelse
-        return error.UnableToCreateWriter;
-    defer _ = archive.c.archive_write_free(writer);
-
-    _ = archive.c.archive_write_disk_set_options(
-        writer,
-        archive.c.ARCHIVE_EXTRACT_PERM |
-            archive.c.ARCHIVE_EXTRACT_TIME |
-            archive.c.ARCHIVE_EXTRACT_OWNER |
-            archive.c.ARCHIVE_EXTRACT_ACL |
-            archive.c.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
-            archive.c.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
-            archive.c.ARCHIVE_EXTRACT_UNLINK |
-            archive.c.ARCHIVE_EXTRACT_FFLAGS,
-    );
+    const writer = try archive.Writer.init();
+    defer writer.deinit();
 
     const pkg_key = @as([*]const u8, @ptrCast(key.mv_data))[0..key.mv_size];
 
@@ -638,10 +451,10 @@ pub fn install(
     try reader.openFd(file.handle);
     var buf: [8192]u8 = undefined;
     while (try reader.nextEntry()) |entry| {
-        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-        if (std.fs.path.isAbsolute(path)) return error.AbsolutePathInPkg;
+        const path: []const u8 = std.mem.span(archive.mdb.c.archive_entry_pathname(entry));
+        if (!std.fs.path.isAbsolute(path)) return error.RelativePathInPkg;
 
-        const path_type = archive.c.archive_entry_mode(entry) & 0o170000;
+        const path_type = archive.mdb.c.archive_entry_mode(entry) & 0o170000;
         const tmp_install_path = if (path.len > 0 and path[0] == '.' and
             !std.mem.startsWith(u8, path, "./") and
             !std.mem.startsWith(u8, path, "../"))
@@ -656,24 +469,18 @@ pub fn install(
             });
         defer self.alloc.free(tmp_install_path);
 
-        archive.c.archive_entry_set_pathname(entry, tmp_install_path.ptr);
-        const ret = archive.c.archive_write_header(writer, entry);
-        if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
+        try writer.writeHeader(entry, tmp_install_path);
 
         if (path_type == 0o100000) {
             while (true) {
                 const bytes = try reader.readData(&buf);
                 if (bytes <= 0) break;
 
-                _ = archive.c.archive_write_data(
-                    writer,
-                    buf[0..bytes].ptr,
-                    bytes,
-                );
+                try writer.writeData(buf[0..bytes], bytes);
             }
         }
 
-        _ = archive.c.archive_write_finish_entry(writer);
+        try writer.finishEntry();
     }
 
     const tmp_dir = try std.fs.cwd().openDir(tmp_path, .{
@@ -736,29 +543,29 @@ fn moveTree(alloc: std.mem.Allocator, src: std.fs.Dir, dest: []const u8) !void {
 
 fn parseMTREE(
     self: *Db,
-    txn: *c.MDB_txn,
+    txn: *mdb.c.MDB_txn,
     key: []const u8,
     mtree_path: []const u8,
     prefix: ?[]const u8,
-) !void {
+) DbError!void {
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
-    const writer = archive.c.archive_write_disk_new() orelse
+    const writer = archive.mdb.c.archive_write_disk_new() orelse
         return error.UnableToCreateWriter;
-    defer _ = archive.c.archive_write_free(writer);
+    defer _ = archive.mdb.c.archive_write_free(writer);
 
-    _ = archive.c.archive_write_disk_set_standard_lookup(writer);
-    _ = archive.c.archive_write_disk_set_options(
+    _ = archive.mdb.c.archive_write_disk_set_standard_lookup(writer);
+    _ = archive.mdb.c.archive_write_disk_set_options(
         writer,
-        archive.c.ARCHIVE_EXTRACT_PERM |
-            archive.c.ARCHIVE_EXTRACT_TIME |
-            archive.c.ARCHIVE_EXTRACT_OWNER |
-            archive.c.ARCHIVE_EXTRACT_ACL |
-            archive.c.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
-            archive.c.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
-            archive.c.ARCHIVE_EXTRACT_UNLINK |
-            archive.c.ARCHIVE_EXTRACT_FFLAGS,
+        archive.mdb.c.ARCHIVE_EXTRACT_PERM |
+            archive.mdb.c.ARCHIVE_EXTRACT_TIME |
+            archive.mdb.c.ARCHIVE_EXTRACT_OWNER |
+            archive.mdb.c.ARCHIVE_EXTRACT_ACL |
+            archive.mdb.c.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
+            archive.mdb.c.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
+            archive.mdb.c.ARCHIVE_EXTRACT_UNLINK |
+            archive.mdb.c.ARCHIVE_EXTRACT_FFLAGS,
     );
 
     const file = std.fs.cwd().openFile(
@@ -772,9 +579,9 @@ fn parseMTREE(
 
     try reader.openFd(file.handle);
     while (try reader.nextEntry()) |entry| {
-        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+        const path: []const u8 = std.mem.span(archive.mdb.c.archive_entry_pathname(entry));
         if (std.mem.startsWith(u8, path, ".")) continue;
-        if (std.fs.path.isAbsolute(path)) return error.AbsolutePathInMTREE;
+        if (!std.fs.path.isAbsolute(path)) return error.RelativePathInMTREE;
 
         const install_path = try std.fs.path.join(self.alloc, &.{
             prefix orelse "/",
@@ -782,21 +589,21 @@ fn parseMTREE(
         });
         defer self.alloc.free(install_path);
 
-        archive.c.archive_entry_set_pathname(entry, install_path.ptr);
-        const ret = archive.c.archive_write_header(writer, entry);
-        if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
-        _ = archive.c.archive_write_finish_entry(writer);
+        archive.mdb.c.archive_entry_set_pathname(entry, install_path.ptr);
+        const ret = archive.mdb.c.archive_write_header(writer, entry);
+        if (ret != archive.mdb.c.ARCHIVE_OK) return error.WriteHeaderFailed;
+        _ = archive.mdb.c.archive_write_finish_entry(writer);
 
-        try insert(txn, self.file_lkp, key, install_path);
-        try insert(txn, self.files_db, install_path, key);
+        try mdb.insert(txn, self.file_lkp, key, install_path);
+        try mdb.insert(txn, self.files_db, install_path, key);
     }
 }
 
 pub fn uninstall(
     self: *Db,
-    txn: *c.MDB_txn,
-    pkg: c.MDB_val,
-) !void {
+    txn: *mdb.c.MDB_txn,
+    pkg: mdb.c.MDB_val,
+) DbError!void {
     const name = @as([*]const u8, @ptrCast(pkg.mv_data))[0..pkg.mv_size];
     const pkg_files = try self.queryLkpRepo(
         txn,
@@ -817,7 +624,7 @@ pub fn uninstall(
             else => return err,
         };
 
-        mdb.checkCode(c.mdb_del(
+        mdb.checkCode(mdb.c.mdb_del(
             txn,
             self.files_db,
             &mdb.mdbVal(path),
@@ -828,7 +635,7 @@ pub fn uninstall(
         };
     }
 
-    mdb.checkCode(c.mdb_del(
+    mdb.checkCode(mdb.c.mdb_del(
         txn,
         self.file_lkp,
         &pkg,
@@ -838,7 +645,7 @@ pub fn uninstall(
         else => return err,
     };
 
-    mdb.checkCode(c.mdb_del(
+    mdb.checkCode(mdb.c.mdb_del(
         txn,
         self.installed_db,
         &pkg,
