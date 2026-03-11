@@ -1,6 +1,7 @@
 const std = @import("std");
 const mdb = @import("utils/mdb.zig");
 
+const Pkg = @import("core/Package.zig");
 const MirrorList = @import("net/MirrorList.zig");
 const Db = @import("core/Database.zig");
 const AUR = struct {
@@ -82,26 +83,39 @@ test "Package Install" {
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
+    const pkg_name: []const u8 = "tree";
+    const repo: ?[]const u8 = "extra";
+
     const txn = try mdb.startTxn();
-    const pkgs = try db.queryLkpRepo(
-        txn,
-        db.pkg_lkp,
-        "tree",
-    );
-    defer alloc.free(pkgs);
-    if (pkgs.len > 1) {
-        @panic("TODO: Handle more than 1 pkg");
+
+    var pkg: ?Pkg = null;
+    defer if (pkg) |p| alloc.free(p);
+    if (repo) |r| {
+        const key = mdb.makeKey(alloc, r, pkg_name);
+        defer alloc.free(key);
+        pkg = try db.queryPkg(alloc, txn, key);
+    } else {
+        const pkgs = try db.queryLkpRepo(
+            txn,
+            db.pkg_lkp,
+            "tree",
+        );
+        defer alloc.free(pkgs);
+        if (pkgs.len > 1) {
+            @panic("TODO: Handle more than 1 pkg");
+        }
+
+        pkg = try db.queryPkg(alloc, txn, pkgs[0]);
     }
 
-    const pkg = try db.queryPkg(alloc, txn, pkgs[0]);
-    defer alloc.free(pkg);
-    try db.install(
-        &mirrors,
-        pkgs[0],
-        pkg,
-        txn,
-        "./tests",
-        &cb,
-    );
+    if (pkg) |p|
+        try db.install(
+            &mirrors,
+            p,
+            pkg,
+            txn,
+            "./tests",
+            &cb,
+        );
     try mdb.endTxn(txn);
 }
