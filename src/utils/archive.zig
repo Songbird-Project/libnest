@@ -38,13 +38,21 @@ pub const Writer = struct {
         _ = c.archive_write_free(self.writer);
     }
 
-    pub fn writeHeader(self: *Writer, entry: *c.archive_entry, path: []const u8) ArchiveError!void {
+    pub fn writeHeader(
+        self: *Writer,
+        entry: *c.archive_entry,
+        path: []const u8,
+    ) ArchiveError!void {
         c.archive_entry_set_pathname(entry, path.ptr);
         const ret = c.archive_write_header(self.writer, entry);
         if (ret != c.ARCHIVE_OK) return error.WriteHeaderFailed;
     }
 
-    pub fn writeData(self: *Writer, data: []const u8, bytes: usize) ArchiveError!void {
+    pub fn writeData(
+        self: *Writer,
+        data: []const u8,
+        bytes: usize,
+    ) ArchiveError!void {
         _ = c.archive_write_data(
             self.writer,
             data.ptr,

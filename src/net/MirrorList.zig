@@ -9,10 +9,7 @@ const MirrorList = @This();
 alloc: std.mem.Allocator,
 mirrors: [][]const u8,
 
-pub fn init(
-    alloc: std.mem.Allocator,
-    path: []const u8,
-) !MirrorList {
+pub fn init(alloc: std.mem.Allocator, path: []const u8) !MirrorList {
     var mirror_file_buffer: [8192]u8 = undefined;
     var mirror_file_reader = (try std.fs.cwd().openFile(
         path,

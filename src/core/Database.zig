@@ -151,7 +151,12 @@ pub fn queryLkpRepo(
     return pkgs.toOwnedSlice(self.alloc);
 }
 
-pub fn queryPkg(self: *Db, alloc: std.mem.Allocator, txn: *mdb.c.MDB_txn, key: []const u8) DbError!Pkg {
+pub fn queryPkg(
+    self: *Db,
+    alloc: std.mem.Allocator,
+    txn: *mdb.c.MDB_txn,
+    key: []const u8,
+) DbError!Pkg {
     var val: mdb.c.MDB_val = undefined;
     const mdb_key = mdb.mdbVal(key);
     try mdb.checkCode(mdb.c.mdb_get(
@@ -507,7 +512,11 @@ pub fn install(
     );
 }
 
-fn moveTree(alloc: std.mem.Allocator, src: std.fs.Dir, dest: []const u8) !void {
+fn moveTree(
+    alloc: std.mem.Allocator,
+    src: std.fs.Dir,
+    dest: []const u8,
+) !void {
     var it = src.iterate();
     while (try it.next()) |entry| {
         const src_path = entry.name;

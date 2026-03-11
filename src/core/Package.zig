@@ -35,7 +35,11 @@ pub const Header = struct {
     optdeps_len: u16,
     checkdeps_len: u16,
 
-    pub fn nextField(raw: [*]const u8, len: usize, ptr: *usize) []const u8 {
+    pub fn nextField(
+        raw: [*]const u8,
+        len: usize,
+        ptr: *usize,
+    ) []const u8 {
         const val = raw[ptr.* .. ptr.* + len];
         ptr.* += len;
         return val;
@@ -68,7 +72,11 @@ pub const Installed = struct {
         deps_len: u16,
         optdeps_len: u16,
 
-        pub fn nextField(raw: [*]const u8, len: usize, ptr: *usize) []const u8 {
+        pub fn nextField(
+            raw: [*]const u8,
+            len: usize,
+            ptr: *usize,
+        ) []const u8 {
             const val = raw[ptr.* .. ptr.* + len];
             ptr.* += len;
             return val;

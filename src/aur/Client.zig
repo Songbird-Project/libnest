@@ -53,9 +53,7 @@ alloc: std.mem.Allocator,
 client: *curl.Easy,
 ca_bundle: *std.array_list.Managed(u8),
 
-pub fn init(
-    alloc: std.mem.Allocator,
-) !Client {
+pub fn init(alloc: std.mem.Allocator) !Client {
     const client = try alloc.create(curl.Easy);
     const ca_bundle = try alloc.create(std.array_list.Managed(u8));
     ca_bundle.* = try curl.allocCABundle(alloc);
@@ -75,7 +73,11 @@ pub fn deinit(self: *Client) void {
     self.alloc.destroy(self.ca_bundle);
 }
 
-pub fn search(self: *Client, query: []const u8, query_kind: QueryKind) !std.json.Parsed(Response(Pkg.Basic)) {
+pub fn search(
+    self: *Client,
+    query: []const u8,
+    query_kind: QueryKind,
+) !std.json.Parsed(Response(Pkg.Basic)) {
     self.client.reset();
 
     var headers: curl.Easy.Headers = .{};
