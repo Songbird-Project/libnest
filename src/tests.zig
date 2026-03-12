@@ -5,7 +5,8 @@ const Pkg = @import("core/Package.zig");
 const MirrorList = @import("net/MirrorList.zig");
 const Db = @import("core/Database.zig");
 const AUR = struct {
-    pub const Client = @import("aur/Client.zig");
+    const Client = @import("aur/Client.zig");
+    const Builder = @import("aur/Builder.zig");
 };
 
 const PKG_DB: []const u8 = "./tests/pkgs.db";
@@ -32,7 +33,7 @@ test "AUR Query" {
 
     var aur_client = try AUR.Client.init(alloc);
     defer aur_client.deinit();
-    const json_res = try aur_client.search("balatro", .NameDesc);
+    const json_res = try aur_client.search("trashy", .NameDesc);
     defer json_res.deinit();
     const res = json_res.value;
 
@@ -44,6 +45,25 @@ test "AUR Query" {
                 result.Description orelse "No description provided.",
             },
         );
+    }
+}
+
+test "AUR Build" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var aur_client = try AUR.Client.init(alloc);
+    defer aur_client.deinit();
+    const json_res = try aur_client.search("trashy", .NameDesc);
+    defer json_res.deinit();
+    const res = json_res.value;
+
+    var b = try AUR.Builder.init(alloc);
+    defer b.deinit();
+
+    for (res.results) |result| {
+        if (std.mem.eql(u8, result.Name, "trashy")) try b.build("tests", result);
     }
 }
 
