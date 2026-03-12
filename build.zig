@@ -43,6 +43,7 @@ pub fn build(b: *std.Build) void {
     tests.linkSystemLibrary("curl");
     tests.linkSystemLibrary("archive");
     tests.linkSystemLibrary("lmdb");
+    tests.linkSystemLibrary("git2");
     tests.linkLibC();
     tests.root_module.addImport("curl", curl.module("curl"));
 
@@ -66,6 +67,7 @@ pub fn build(b: *std.Build) void {
         lib.linkSystemLibrary("curl");
         lib.linkSystemLibrary("archive");
         lib.linkSystemLibrary("lmdb");
+        lib.linkSystemLibrary("git2");
         lib.linkLibC();
         b.installArtifact(lib);
     }
