@@ -12,6 +12,11 @@ pub fn build(b: *std.Build) void {
         "emit-dynamic",
         "Emit a dynamic library",
     ) orelse false;
+    const test_filters = b.option(
+        [][]const u8,
+        "test",
+        "Test to run",
+    ) orelse &.{};
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -38,6 +43,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
         .use_llvm = true,
+        .filters = test_filters,
     });
 
     tests.linkSystemLibrary("curl");
