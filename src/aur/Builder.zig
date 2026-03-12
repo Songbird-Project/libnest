@@ -17,12 +17,12 @@ pub fn deinit(self: *Builder) void {
     _ = self;
 }
 
-pub fn build(self: *Builder, prefix: []const u8, pkg: Pkg.Basic) !void {
+pub fn build(self: *Builder, prefix: ?[]const u8, pkg: Pkg.Basic) !void {
     const cache = try std.fs.path.join(self.alloc, &.{
         prefix orelse "/",
         "var",
         "cache",
-        pkg.ID,
+        pkg.Name,
     });
     defer self.alloc.free(cache);
 
