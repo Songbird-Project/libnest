@@ -87,7 +87,7 @@ pub const Installed = struct {
 
         version_len: u16,
         description_len: u16,
-        url_len: []const u16,
+        url_len: u16,
         arch_len: u16,
         license_len: u16,
         packager_len: u16,
