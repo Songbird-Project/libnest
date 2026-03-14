@@ -54,12 +54,6 @@ pub fn index(
         fields.get("NAME") orelse unreachable,
         pkg,
     );
-    try mdb.insert(
-        txn,
-        db.pkg_lkp,
-        fields.get("NAME") orelse unreachable,
-        key,
-    );
 }
 
 pub fn parse(alloc: std.mem.Allocator, src: []const u8) !std.StringHashMap([]const u8) {
