@@ -40,7 +40,7 @@ pub fn checkCode(code: c_int) MDBError!void {
     }
 
     return switch (code) {
-        0 => error.Success,
+        0 => {},
         -30799 => error.KeyExist,
         -30798 => error.NotFound,
         -30797 => error.PagNotFound,
@@ -76,8 +76,8 @@ pub fn makeKey(
     alloc: std.mem.Allocator,
     repo: []const u8,
     name: []const u8,
-) []const u8 {
-    return std.mem.concat(alloc, u8, &.{ name, "\x00", repo });
+) ![]u8 {
+    return try std.mem.concat(alloc, u8, &.{ name, "@", repo });
 }
 
 pub fn startTxn(db: *Db) !*c.MDB_txn {
@@ -189,7 +189,7 @@ pub fn insertPkg(
         w += field.len;
     }
 
-    const key_str = makeKey(
+    const key_str = try makeKey(
         alloc,
         repo,
         pkg_name,
@@ -207,9 +207,9 @@ pub fn insertPkg(
     ));
 }
 
-pub fn readPkg(alloc: std.mem.Allocator, val: c.MDB_val) !Pkg {
-    const raw = @as([*]const u8, @ptrCast(val.mv_data));
-    if (val.mv_size < @sizeOf(Pkg.Header)) return error.CorruptPkg;
+pub fn readPkg(alloc: std.mem.Allocator, val: []const u8) !Pkg {
+    const raw = @as([*]const u8, @ptrCast(val));
+    if (val.len < @sizeOf(Pkg.Header)) return error.CorruptPkg;
 
     var header: Pkg.Header = undefined;
     @memcpy(
@@ -233,26 +233,127 @@ pub fn readPkg(alloc: std.mem.Allocator, val: c.MDB_val) !Pkg {
         header.mkdeps_len +
         header.optdeps_len +
         header.checkdeps_len;
-    if (expected > val.mv_size) return error.CorruptPkg;
+    if (expected > val.len) return error.CorruptPkg;
 
     var ptr: usize = @sizeOf(Pkg.Header);
     return .{
         .build_date = header.build_date,
 
-        .version = alloc.dupe(u8, Pkg.Header.nextField(raw, header.version_len, &ptr)),
-        .description = alloc.dupe(u8, Pkg.Header.nextField(raw, header.description_len, &ptr)),
-        .arch = alloc.dupe(u8, Pkg.Header.nextField(raw, header.arch_len, &ptr)),
-        .license = alloc.dupe(u8, Pkg.Header.nextField(raw, header.license_len, &ptr)),
-        .filename = alloc.dupe(u8, Pkg.Header.nextField(raw, header.filename_len, &ptr)),
-        .packager = alloc.dupe(u8, Pkg.Header.nextField(raw, header.packager_len, &ptr)),
-        .checksum = alloc.dupe(u8, Pkg.Header.nextField(raw, header.checksum_len, &ptr)),
-        .signature = alloc.dupe(u8, Pkg.Header.nextField(raw, header.signature_len, &ptr)),
-        .replaces = alloc.dupe(u8, Pkg.Header.nextField(raw, header.replaces_len, &ptr)),
-        .conflicts = alloc.dupe(u8, Pkg.Header.nextField(raw, header.conflicts_len, &ptr)),
-        .provides = alloc.dupe(u8, Pkg.Header.nextField(raw, header.provides_len, &ptr)),
-        .deps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.deps_len, &ptr)),
-        .mkdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.mkdeps_len, &ptr)),
-        .optdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.optdeps_len, &ptr)),
-        .checkdeps = alloc.dupe(u8, Pkg.Header.nextField(raw, header.checkdeps_len, &ptr)),
+        .version = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.version_len, &ptr)),
+        .description = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.description_len, &ptr)),
+        .arch = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.arch_len, &ptr)),
+        .license = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.license_len, &ptr)),
+        .filename = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.filename_len, &ptr)),
+        .packager = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.packager_len, &ptr)),
+        .checksum = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.checksum_len, &ptr)),
+        .signature = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.signature_len, &ptr)),
+        .replaces = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.replaces_len, &ptr)),
+        .conflicts = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.conflicts_len, &ptr)),
+        .provides = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.provides_len, &ptr)),
+        .deps = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.deps_len, &ptr)),
+        .mkdeps = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.mkdeps_len, &ptr)),
+        .optdeps = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.optdeps_len, &ptr)),
+        .checkdeps = try alloc.dupe(u8, Pkg.Header.nextField(raw, header.checkdeps_len, &ptr)),
+    };
+}
+
+pub fn insertInstalledPkg(
+    alloc: std.mem.Allocator,
+    txn: *c.MDB_txn,
+    dbi: c.MDB_dbi,
+    key: []const u8,
+    fields: Pkg.Installed,
+) !void {
+    const pkg_len =
+        @sizeOf(Pkg.Installed.Header) +
+        fields.version.len +
+        fields.description.len +
+        fields.url.len +
+        fields.arch.len +
+        fields.license.len +
+        fields.packager.len +
+        fields.deps.len +
+        fields.optdeps.len;
+    var buf = try alloc.alloc(u8, pkg_len);
+    defer alloc.free(buf);
+    var w: usize = 0;
+
+    const header: Pkg.Installed.Header = .{
+        .build_date = fields.build_date,
+        .size = fields.size,
+        .version_len = @intCast(fields.version.len),
+        .description_len = @intCast(fields.description.len),
+        .url_len = @intCast(fields.url.len),
+        .arch_len = @intCast(fields.arch.len),
+        .license_len = @intCast(fields.license.len),
+        .packager_len = @intCast(fields.packager.len),
+        .deps_len = @intCast(fields.deps.len),
+        .optdeps_len = @intCast(fields.optdeps.len),
+    };
+
+    @memmove(
+        buf[0..@sizeOf(Pkg.Installed.Header)],
+        std.mem.asBytes(&header),
+    );
+    w += @sizeOf(Pkg.Installed.Header);
+
+    inline for ([_][]const u8{
+        fields.version,
+        fields.description,
+        fields.url,
+        fields.arch,
+        fields.license,
+        fields.packager,
+        fields.deps,
+        fields.optdeps,
+    }) |field| {
+        @memmove(buf[w..][0..field.len], field);
+        w += field.len;
+    }
+
+    var mdb_key = mdbVal(key);
+    var val = mdbVal(buf[0..w]);
+
+    try checkCode(c.mdb_put(
+        txn,
+        dbi,
+        &mdb_key,
+        &val,
+        0,
+    ));
+}
+
+pub fn readInstalledPkg(alloc: std.mem.Allocator, val: []const u8) !Pkg.Installed {
+    const raw = @as([*]const u8, @ptrCast(val));
+    if (val.len < @sizeOf(Pkg.Installed.Header)) return error.CorruptPkg;
+
+    var header: Pkg.Installed.Header = undefined;
+    @memcpy(
+        std.mem.asBytes(&header),
+        raw[0..@sizeOf(Pkg.Installed.Header)],
+    );
+    const expected = @sizeOf(Pkg.Installed.Header) +
+        header.version_len +
+        header.description_len +
+        header.url_len +
+        header.arch_len +
+        header.license_len +
+        header.packager_len +
+        header.deps_len +
+        header.optdeps_len;
+    if (expected > val.mv_size) return error.CorruptPkg;
+
+    var ptr: usize = @sizeOf(Pkg.Installed.Header);
+    return .{
+        .build_date = header.build_date,
+
+        .version = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.version_len, &ptr)),
+        .description = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.description_len, &ptr)),
+        .url = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.url_len, &ptr)),
+        .arch = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.arch_len, &ptr)),
+        .license = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.license_len, &ptr)),
+        .packager = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.packager_len, &ptr)),
+        .deps = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.deps_len, &ptr)),
+        .optdeps = alloc.dupe(u8, Pkg.Installed.Header.nextField(raw, header.optdeps_len, &ptr)),
     };
 }

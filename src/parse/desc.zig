@@ -2,10 +2,12 @@ const std = @import("std");
 const Db = @import("../core/Database.zig");
 const Pkg = @import("../core/Package.zig");
 
+const mdb = @import("../utils/mdb.zig");
+
 pub fn index(
     alloc: std.mem.Allocator,
     db: *Db,
-    txn: *Db.c.MDB_txn,
+    txn: *mdb.c.MDB_txn,
     desc: []const u8,
     repo: []const u8,
 ) !void {
@@ -38,13 +40,13 @@ pub fn index(
         .checkdeps = fields.get("CHECKDEPENDS") orelse "[]",
     };
 
-    const key = Db.makeKey(
+    const key = try mdb.makeKey(
         alloc,
         repo,
         fields.get("NAME") orelse unreachable,
     );
     defer alloc.free(key);
-    try Db.insertPkg(
+    try mdb.insertPkg(
         alloc,
         txn,
         db.pkgs_db,
@@ -52,7 +54,7 @@ pub fn index(
         fields.get("NAME") orelse unreachable,
         pkg,
     );
-    try Db.insert(
+    try mdb.insert(
         txn,
         db.pkg_lkp,
         fields.get("NAME") orelse unreachable,

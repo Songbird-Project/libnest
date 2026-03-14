@@ -1,3 +1,7 @@
+const std = @import("std");
+
+const Pkg = @This();
+
 build_date: i64,
 version: []const u8,
 description: []const u8,
@@ -14,6 +18,24 @@ deps: []const u8,
 mkdeps: []const u8,
 optdeps: []const u8,
 checkdeps: []const u8,
+
+pub fn deinit(self: Pkg, alloc: std.mem.Allocator) void {
+    alloc.free(self.version);
+    alloc.free(self.description);
+    alloc.free(self.arch);
+    alloc.free(self.license);
+    alloc.free(self.filename);
+    alloc.free(self.packager);
+    alloc.free(self.checksum);
+    alloc.free(self.signature);
+    alloc.free(self.replaces);
+    alloc.free(self.conflicts);
+    alloc.free(self.provides);
+    alloc.free(self.deps);
+    alloc.free(self.mkdeps);
+    alloc.free(self.optdeps);
+    alloc.free(self.checkdeps);
+}
 
 pub const Header = struct {
     schema_version: u8 = 1,
@@ -82,4 +104,9 @@ pub const Installed = struct {
             return val;
         }
     };
+};
+
+pub const Response = struct {
+    key: []const u8,
+    pkg: Pkg,
 };
