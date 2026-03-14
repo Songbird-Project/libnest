@@ -370,7 +370,6 @@ pub fn install(
     );
     defer file.close();
 
-    std.debug.print("\nFD: {}\n", .{file.handle});
     try reader.openFd(file.handle);
     var buf: [8192]u8 = undefined;
     while (try reader.nextEntry()) |entry| {
@@ -422,8 +421,9 @@ pub fn install(
 
     const pkginfo_path = try std.fs.path.join(self.alloc, &.{
         cache,
-        ".MTREE",
+        ".PKGINFO",
     });
+    defer self.alloc.free(pkginfo_path);
     try pkginfo.index(
         self.alloc,
         self,
