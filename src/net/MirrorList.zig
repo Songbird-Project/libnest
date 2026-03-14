@@ -10,43 +10,31 @@ alloc: std.mem.Allocator,
 mirrors: [][]const u8,
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8) !MirrorList {
-    var mirror_file_buffer: [8192]u8 = undefined;
-    var mirror_file_reader = (try std.fs.cwd().openFile(
+    const mirror_file = try std.fs.cwd().readFileAlloc(
+        alloc,
         path,
-        .{ .mode = .read_only },
-    )).reader(&mirror_file_buffer);
-    const mirror_file = &mirror_file_reader.interface;
+        1024 * 1024,
+    );
+    defer alloc.free(mirror_file);
 
     var mirrors: std.ArrayList([]const u8) = .empty;
     defer mirrors.deinit(alloc);
-    var mirrors_writer: std.io.Writer.Allocating = .init(alloc);
-    defer mirrors_writer.deinit();
 
-    while (true) {
-        _ = mirror_file.streamDelimiter(&mirrors_writer.writer, '\n') catch |err| {
-            if (err == error.EndOfStream) break else return err;
-        };
-        if (mirrors_writer.written().len <= 0) continue;
-        if (mirrors_writer.written().len >= 1 and mirrors_writer.written()[0] == '#') continue;
-
-        if (std.mem.indexOfScalar(u8, mirrors_writer.written(), '=')) |eql| {
-            const mirror = std.mem.trim(
-                u8,
-                mirrors_writer.written()[eql + 1 .. mirrors_writer.written().len],
-                " \r\t",
-            );
-            try mirrors.append(
-                alloc,
-                try alloc.dupe(u8, mirror),
-            );
+    var lines = std.mem.splitScalar(u8, mirror_file, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(
+            u8,
+            raw_line,
+            " \r\t",
+        );
+        if (line.len == 0) continue;
+        if (line[0] == '#') continue;
+        if (std.mem.indexOfScalar(u8, line, '=')) |eql| {
+            const mirror = std.mem.trim(u8, line[eql + 1 ..], " \t");
+            if (!std.mem.startsWith(u8, mirror, "http://") and
+                !std.mem.startsWith(u8, mirror, "https://")) continue;
+            try mirrors.append(alloc, try alloc.dupe(u8, mirror));
         }
-
-        _ = mirror_file.toss(1);
-        mirrors_writer.clearRetainingCapacity();
-    }
-
-    if (mirrors_writer.written().len > 0) {
-        try mirrors.append(alloc, mirrors_writer.written());
     }
 
     return MirrorList{
@@ -62,7 +50,7 @@ pub fn deinit(self: *MirrorList) void {
 
 pub fn downloadPkg(
     self: MirrorList,
-    mdb_name_repo: Db.c.MDB_val,
+    name_repo: []const u8,
     pkg: Pkg,
     dest: []const u8,
     download_cb: ?*const Downloader.callback,
@@ -70,11 +58,7 @@ pub fn downloadPkg(
     var dl: Downloader = try .init(self.alloc, 3, download_cb);
     defer dl.deinit();
 
-    const name_repo = @as(
-        [*]const u8,
-        @ptrCast(mdb_name_repo.mv_data),
-    )[0..mdb_name_repo.mv_size];
-    const name_repo_delim = std.mem.indexOfScalar(u8, name_repo, 0);
+    const name_repo_delim = std.mem.indexOfScalar(u8, name_repo, '@');
     const repo = name_repo[name_repo_delim.? + 1 ..];
 
     for (self.mirrors) |mirror| {
