@@ -1,15 +1,17 @@
 const std = @import("std");
+const mdb = @import("../utils/mdb.zig");
+
 const Db = @import("../core/Database.zig");
 const Pkg = @import("../core/Package.zig");
 
 pub fn index(
     alloc: std.mem.Allocator,
     db: *Db,
-    txn: *Db.c.MDB_txn,
-    key: Db.c.MDB_val,
-    desc: []const u8,
-) ![]const u8 {
-    var fields: std.StringHashMap([]const u8) = try parse(alloc, desc);
+    txn: *mdb.c.MDB_txn,
+    key: []const u8,
+    path: []const u8,
+) !void {
+    var fields: std.StringHashMap([]const u8) = try parse(alloc, path);
     defer {
         var it = fields.keyIterator();
         while (it.next()) |k| alloc.free(k.*);
@@ -32,24 +34,26 @@ pub fn index(
         .optdeps = fields.get("optdepend") orelse "[]",
     };
 
-    try Db.insertInstalledPkg(
+    try mdb.insertInstalledPkg(
         alloc,
         txn,
         db.installed_db,
         key,
         pkg,
     );
-
-    return key;
 }
 
-pub fn parse(alloc: std.mem.Allocator, src: []const u8) !std.StringHashMap([]const u8) {
-    var lines = std.mem.splitScalar(u8, src, '\n');
+pub fn parse(alloc: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
+    const pkginfo = try std.fs.cwd().readFileAlloc(
+        alloc,
+        path,
+        1024 * 1024,
+    );
+    defer alloc.free(pkginfo);
+    var lines = std.mem.splitScalar(u8, pkginfo, '\n');
 
-    var current_field: ?[]const u8 = null;
     var fields: std.StringHashMap([]const u8) = .init(alloc);
     errdefer {
-        if (current_field) |field| alloc.free(field);
         var it = fields.keyIterator();
         while (it.next()) |key| alloc.free(key.*);
         it = fields.valueIterator();
@@ -60,8 +64,6 @@ pub fn parse(alloc: std.mem.Allocator, src: []const u8) !std.StringHashMap([]con
 
     var current_value: std.ArrayList(u8) = .empty;
     defer current_value.deinit(alloc);
-    var json_value: std.io.Writer.Allocating = .init(alloc);
-    defer json_value.deinit();
 
     while (lines.next()) |line| {
         const trimmed_line = std.mem.trim(
@@ -74,39 +76,57 @@ pub fn parse(alloc: std.mem.Allocator, src: []const u8) !std.StringHashMap([]con
         if (trimmed_line[0] == '#') continue;
 
         if (std.mem.indexOfScalar(u8, trimmed_line, '=')) |eql| {
-            if (current_field == null) {
-                current_field = try alloc.dupe(u8, trimmed_line[0..eql]);
-            } else if (current_field) |field| {
-                if (!std.mem.eql(u8, trimmed_line[0..eql], field)) {
-                    try std.json.fmt(current_value.items, .{}).format(json_value);
+            const raw_key = trimmed_line[0..eql];
+            const raw_val = trimmed_line[eql + 1 ..];
 
-                    try fields.put(
-                        field,
-                        json_value.written(),
+            const key = std.mem.trim(
+                u8,
+                raw_key,
+                " \t\r",
+            );
+            var val = std.mem.trim(
+                u8,
+                raw_val,
+                " \t\r",
+            );
+
+            if (std.mem.indexOfScalar(u8, val, ',')) |_| {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(alloc);
+
+                try buf.append(alloc, '[');
+
+                var first = true;
+                var parts = std.mem.splitScalar(
+                    u8,
+                    val,
+                    ',',
+                );
+                while (parts.next()) |p| {
+                    const trimmed = std.mem.trim(
+                        u8,
+                        p,
+                        " \t\r",
                     );
+                    if (!first) try buf.append(alloc, ',');
 
-                    json_value.clearRetainingCapacity();
-                    current_value.clearRetainingCapacity();
+                    try buf.append(alloc, '"');
+                    try buf.appendSlice(alloc, trimmed);
+                    try buf.append(alloc, '"');
 
-                    current_field = null;
-                    current_field = try alloc.dupe(u8, trimmed_line[0..eql]);
-                } else {
-                    try current_value.appendSlice(alloc, trimmed_line);
+                    first = false;
                 }
+
+                try buf.append(alloc, ']');
+
+                val = try buf.toOwnedSlice(alloc);
             }
+
+            try fields.put(
+                try alloc.dupe(u8, key),
+                try alloc.dupe(u8, val),
+            );
         }
-    }
-
-    if (current_field) |field| {
-        try std.json.fmt(current_value.items, .{}).format(json_value);
-
-        try fields.put(
-            field,
-            json_value.written(),
-        );
-
-        json_value.clearRetainingCapacity();
-        current_value.clearRetainingCapacity();
     }
 
     return fields;
