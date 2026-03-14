@@ -104,38 +104,30 @@ test "Package Install" {
     defer mirrors.deinit();
 
     const pkg_name: []const u8 = "tree";
-    const repo: ?[]const u8 = "extra";
 
-    const txn = try mdb.startTxn();
+    const txn = try mdb.startTxn(&db);
 
-    var pkg: ?Pkg = null;
-    defer if (pkg) |p| alloc.free(p);
-    if (repo) |r| {
-        const key = mdb.makeKey(alloc, r, pkg_name);
-        defer alloc.free(key);
-        pkg = try db.queryPkg(alloc, txn, key);
-    } else {
-        const pkgs = try db.queryLkpRepo(
-            txn,
-            db.pkg_lkp,
-            "tree",
-        );
-        defer alloc.free(pkgs);
-        if (pkgs.len > 1) {
-            @panic("TODO: Handle more than 1 pkg");
+    const pkgs = try db.queryPkg(
+        txn,
+        pkg_name,
+    );
+    defer {
+        for (pkgs) |pkg| {
+            pkg.pkg.deinit(alloc);
         }
-
-        pkg = try db.queryPkg(alloc, txn, pkgs[0]);
+        alloc.free(pkgs);
+    }
+    if (pkgs.len > 1) {
+        @panic("TODO: Handle more than 1 pkg");
     }
 
-    if (pkg) |p|
-        try db.install(
-            &mirrors,
-            p,
-            pkg,
-            txn,
-            "./tests",
-            &cb,
-        );
+    try db.install(
+        &mirrors,
+        pkgs[0].key,
+        pkgs[0].pkg,
+        txn,
+        "./tests",
+        &cb,
+    );
     try mdb.endTxn(txn);
 }
