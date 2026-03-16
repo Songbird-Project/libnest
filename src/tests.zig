@@ -73,6 +73,7 @@ test "Sync Mirrors" {
     const alloc = gpa.allocator();
 
     const repos = [_][]const u8{ "core", "multilib", "extra" };
+    // const repos = [_][]const u8{"core"};
 
     var db = try Db.init(alloc, PKG_DB);
     defer db.deinit();
@@ -109,13 +110,13 @@ test "Package Install" {
 
     const pkgs = try db.query(
         Pkg,
-        db.installed_db,
+        db.pkgs_db,
         txn,
         pkg_name,
     );
     defer {
         for (pkgs) |pkg| {
-            pkg.val.deinit(alloc);
+            pkg.val.deinit();
         }
         alloc.free(pkgs);
     }
@@ -126,7 +127,7 @@ test "Package Install" {
     try db.install(
         &mirrors,
         pkgs[0].key,
-        pkgs[0].val,
+        pkgs[0].val.value,
         txn,
         "./tests",
         &cb,
