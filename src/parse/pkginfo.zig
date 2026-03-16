@@ -11,29 +11,8 @@ pub fn index(
     key: []const u8,
     path: []const u8,
 ) !void {
-    var fields: std.StringHashMap([]const u8) = try parse(alloc, path);
-    defer {
-        var it = fields.keyIterator();
-        while (it.next()) |k| alloc.free(k.*);
-        it = fields.valueIterator();
-        while (it.next()) |value| alloc.free(value.*);
-
-        fields.deinit();
-    }
-
-    const pkg: Pkg.Installed = .{
-        .name = fields.get("name") orelse unreachable,
-        .build_date = try std.fmt.parseInt(i64, fields.get("builddate") orelse unreachable, 10),
-        .size = try std.fmt.parseInt(i64, fields.get("size") orelse unreachable, 10),
-        .version = fields.get("pkgver") orelse unreachable,
-        .description = fields.get("pkgdesc") orelse unreachable,
-        .url = fields.get("url") orelse unreachable,
-        .arch = fields.get("arch") orelse unreachable,
-        .license = fields.get("license") orelse unreachable,
-        .packager = fields.get("packager") orelse unreachable,
-        .deps = fields.get("depend") orelse "[]",
-        .optdeps = fields.get("optdepend") orelse "[]",
-    };
+    const pkg = try parse(alloc, path);
+    defer pkg.deinit(alloc);
 
     try mdb.insert(
         alloc,
@@ -44,94 +23,84 @@ pub fn index(
     );
 }
 
-pub fn parse(alloc: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
-    const pkginfo = try std.fs.cwd().readFileAlloc(
-        alloc,
-        path,
-        1024 * 1024,
-    );
+pub fn parse(alloc: std.mem.Allocator, path: []const u8) !Pkg.Installed {
+    const pkginfo = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024);
     defer alloc.free(pkginfo);
-    var lines = std.mem.splitScalar(u8, pkginfo, '\n');
 
-    var fields: std.StringHashMap([]const u8) = .init(alloc);
-    errdefer {
-        var it = fields.keyIterator();
-        while (it.next()) |key| alloc.free(key.*);
-        it = fields.valueIterator();
-        while (it.next()) |value| alloc.free(value.*);
-
+    var fields = std.StringHashMap([][]const u8).init(alloc);
+    defer {
+        var it = fields.iterator();
+        while (it.next()) |entry| {
+            alloc.free(entry.key_ptr.*);
+            for (entry.value_ptr.*) |str| alloc.free(str);
+            alloc.free(entry.value_ptr.*);
+        }
         fields.deinit();
     }
 
-    var current_value: std.ArrayList(u8) = .empty;
-    defer current_value.deinit(alloc);
+    var lines = std.mem.splitScalar(u8, pkginfo, '\n');
+    var current_values: std.ArrayList([]const u8) = .empty;
+    defer current_values.deinit(alloc);
 
     while (lines.next()) |line| {
-        const trimmed_line = std.mem.trim(
-            u8,
-            line,
-            " \r\t",
-        );
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
-        if (trimmed_line.len <= 0) continue;
-        if (trimmed_line[0] == '#') continue;
-
-        if (std.mem.indexOfScalar(u8, trimmed_line, '=')) |eql| {
-            const raw_key = trimmed_line[0..eql];
-            const raw_val = trimmed_line[eql + 1 ..];
-
+        if (std.mem.indexOfScalar(u8, trimmed, '=')) |eql| {
             const key = std.mem.trim(
                 u8,
-                raw_key,
+                trimmed[0..eql],
                 " \t\r",
             );
-            var val = std.mem.trim(
+            const val = std.mem.trim(
                 u8,
-                raw_val,
+                trimmed[eql + 1 ..],
                 " \t\r",
             );
 
-            if (std.mem.indexOfScalar(u8, val, ',') != null or
-                std.mem.eql(u8, "depend", key) or
-                std.mem.eql(u8, "optdepend", key))
-            {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(alloc);
-
-                try buf.append(alloc, '[');
-
-                var first = true;
-                var parts = std.mem.splitScalar(
+            var parts = std.mem.splitScalar(u8, val, ',');
+            while (parts.next()) |p| {
+                try current_values.append(alloc, try alloc.dupe(u8, std.mem.trim(
                     u8,
-                    val,
-                    ',',
-                );
-                while (parts.next()) |p| {
-                    const trimmed = std.mem.trim(
-                        u8,
-                        p,
-                        " \t\r",
-                    );
-                    if (!first) try buf.append(alloc, ',');
-
-                    try buf.append(alloc, '"');
-                    try buf.appendSlice(alloc, trimmed);
-                    try buf.append(alloc, '"');
-
-                    first = false;
-                }
-
-                try buf.append(alloc, ']');
-
-                val = try buf.toOwnedSlice(alloc);
+                    p,
+                    " \t\r",
+                )));
             }
 
             try fields.put(
                 try alloc.dupe(u8, key),
-                try alloc.dupe(u8, val),
+                try current_values.toOwnedSlice(alloc),
             );
         }
     }
 
-    return fields;
+    const get = struct {
+        fn f(m: anytype, k: []const u8) []const u8 {
+            return if (m.get(k)) |v| (if (v.len > 0) v[0] else "") else "";
+        }
+    }.f;
+
+    const deepDupe = struct {
+        fn f(a: std.mem.Allocator, slices: [][]const u8) ![][]const u8 {
+            const new_slices = try a.alloc([]const u8, slices.len);
+            for (slices, 0..) |slice, i| {
+                new_slices[i] = try a.dupe(u8, slice);
+            }
+            return new_slices;
+        }
+    }.f;
+
+    return Pkg.Installed{
+        .name = try alloc.dupe(u8, get(fields, "pkgname")),
+        .version = try alloc.dupe(u8, get(fields, "pkgver")),
+        .description = try alloc.dupe(u8, get(fields, "pkgdesc")),
+        .url = try alloc.dupe(u8, get(fields, "url")),
+        .arch = try alloc.dupe(u8, get(fields, "arch")),
+        .packager = try alloc.dupe(u8, get(fields, "packager")),
+        .build_date = try std.fmt.parseInt(i64, get(fields, "builddate"), 10),
+        .size = try std.fmt.parseInt(i64, get(fields, "size"), 10),
+        .license = try deepDupe(alloc, fields.get("license") orelse &.{}),
+        .deps = try deepDupe(alloc, fields.get("depend") orelse &.{}),
+        .optdeps = try deepDupe(alloc, fields.get("optdepend") orelse &.{}),
+    };
 }

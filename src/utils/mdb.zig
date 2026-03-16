@@ -9,7 +9,7 @@ const Db = @import("../core/Database.zig");
 pub fn Response(comptime T: type) type {
     return struct {
         key: []const u8,
-        val: T,
+        val: std.json.Parsed(T),
     };
 }
 

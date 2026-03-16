@@ -194,7 +194,7 @@ pub fn query(
 
         try pkgs.append(self.alloc, .{
             .key = pkg_key,
-            .val = val.value,
+            .val = val,
         });
 
         mdb.checkCode(mdb.c.mdb_cursor_get(
