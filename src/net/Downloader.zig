@@ -70,11 +70,8 @@ pub fn download(
     var headers: curl.Easy.Headers = .{};
     defer headers.deinit();
 
-    const old_exists: bool = exists: {
-        std.fs.cwd().access(
-            dest,
-            .{},
-        ) catch |err| switch (err) {
+    const partial_exists: bool = exists: {
+        std.fs.cwd().access(dest, .{}) catch |err| switch (err) {
             error.FileNotFound => break :exists false,
             else => return err,
         };
@@ -82,17 +79,46 @@ pub fn download(
         break :exists true;
     };
 
-    if (old_exists) try std.fs.cwd().deleteFile(dest);
+    const partial_size = size: {
+        break :size (try (std.fs.cwd().openFile(
+            dest,
+            .{},
+        ) catch |err| switch (err) {
+            error.FileNotFound => break :size 0,
+            else => return err,
+        }).stat()).size;
+    };
 
-    var file: std.fs.File = try std.fs.cwd().createFile(
-        dest,
-        .{},
+    const range = try std.fmt.allocPrintSentinel(
+        self.alloc,
+        "Range: bytes={d}-",
+        .{partial_size},
+        0,
     );
+    defer self.alloc.free(range);
+
+    var file: std.fs.File = if (partial_exists)
+        try std.fs.cwd().openFile(
+            dest,
+            .{ .mode = .read_write },
+        )
+    else
+        try std.fs.cwd().createFile(
+            dest,
+            .{},
+        );
     defer file.close();
+
+    if (partial_exists) {
+        try file.seekTo(partial_size);
+    }
 
     const usable_url = try self.alloc.dupeZ(u8, url);
     defer self.alloc.free(usable_url);
     try self.client.setUrl(usable_url);
+
+    if (partial_exists) try headers.add(range);
+    try self.client.setHeaders(headers);
 
     try self.client.setMethod(.GET);
     try curl.checkCode(curl.libcurl.curl_easy_setopt(
@@ -117,10 +143,24 @@ pub fn download(
     const response = try self.client.perform();
     if (self.cb_error) |err| return err;
 
-    if (response.status_code == 200 or response.status_code == 206)
+    if (response.status_code == 200 or
+        (response.status_code == 206 and partial_exists))
+    {
         self.retries = 0;
+        return;
+    }
 
     if (response.status_code == 416) {
+        if (try response.getHeader("Content-Range")) |cr_header| {
+            const range_delim = std.mem.indexOfScalar(u8, cr_header.get(), '/');
+            const length = try std.fmt.parseInt(
+                usize,
+                cr_header.get()[range_delim.? + 1 ..],
+                10,
+            );
+            if (partial_size == length) return;
+        }
+
         if (self.retries == self.retry_limit) {
             return error.TooManyRetries;
         }
