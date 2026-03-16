@@ -22,6 +22,7 @@ pub fn index(
     }
 
     const pkg: Pkg.Installed = .{
+        .name = fields.get("name") orelse unreachable,
         .build_date = try std.fmt.parseInt(i64, fields.get("builddate") orelse unreachable, 10),
         .size = try std.fmt.parseInt(i64, fields.get("size") orelse unreachable, 10),
         .version = fields.get("pkgver") orelse unreachable,
@@ -34,7 +35,7 @@ pub fn index(
         .optdeps = fields.get("optdepend") orelse "[]",
     };
 
-    try mdb.insertInstalledPkg(
+    try mdb.insert(
         alloc,
         txn,
         db.installed_db,
@@ -90,7 +91,10 @@ pub fn parse(alloc: std.mem.Allocator, path: []const u8) !std.StringHashMap([]co
                 " \t\r",
             );
 
-            if (std.mem.indexOfScalar(u8, val, ',')) |_| {
+            if (std.mem.indexOfScalar(u8, val, ',') != null or
+                std.mem.eql(u8, "depend", key) or
+                std.mem.eql(u8, "optdepend", key))
+            {
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(alloc);
 

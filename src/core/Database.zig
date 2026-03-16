@@ -139,18 +139,20 @@ pub fn queryLkpRepo(
     return pkgs.toOwnedSlice(self.alloc);
 }
 
-pub fn queryPkg(
+pub fn query(
     self: *Db,
+    T: anytype,
+    dbi: mdb.c.MDB_dbi,
     txn: *mdb.c.MDB_txn,
     name: []const u8,
-) ![]Pkg.Response {
+) ![]mdb.Response(T) {
     var cursor: ?*mdb.c.MDB_cursor = null;
     try mdb.checkCode(
-        mdb.c.mdb_cursor_open(txn, self.pkgs_db, &cursor),
+        mdb.c.mdb_cursor_open(txn, dbi, &cursor),
     );
     defer mdb.c.mdb_cursor_close(cursor);
 
-    var pkgs: std.ArrayList(Pkg.Response) = .empty;
+    var pkgs: std.ArrayList(mdb.Response(T)) = .empty;
     defer pkgs.deinit(self.alloc);
 
     const name_delim = try std.fmt.allocPrint(
@@ -168,7 +170,7 @@ pub fn queryPkg(
         &mdb_val,
         mdb.c.MDB_SET_RANGE,
     )) catch |err| switch (err) {
-        error.NotFound => return &[_]Pkg.Response{},
+        error.NotFound => return &[_]mdb.Response(T){},
         else => {},
     };
 
@@ -183,9 +185,16 @@ pub fn queryPkg(
         )[0..key.mv_size];
         if (!std.mem.startsWith(u8, pkg_key, name_delim)) break;
 
+        const val = try std.json.parseFromSlice(
+            T,
+            self.alloc,
+            data,
+            .{},
+        );
+
         try pkgs.append(self.alloc, .{
             .key = pkg_key,
-            .pkg = try mdb.readPkg(self.alloc, data),
+            .val = val.value,
         });
 
         mdb.checkCode(mdb.c.mdb_cursor_get(
@@ -197,24 +206,6 @@ pub fn queryPkg(
     }
 
     return pkgs.toOwnedSlice(self.alloc);
-}
-
-pub fn queryInstalledPkg(
-    self: *Db,
-    alloc: std.mem.Allocator,
-    txn: *mdb.c.MDB_txn,
-    key: []const u8,
-) DbError!Pkg.Installed {
-    var val: mdb.c.MDB_val = undefined;
-    const mdb_key = mdb.mdbVal(key);
-    try mdb.checkCode(mdb.c.mdb_get(
-        txn,
-        self.installed_db,
-        &mdb_key,
-        &val,
-    ));
-
-    return try mdb.readInstalledPkg(alloc, val);
 }
 
 pub fn sync(
@@ -486,8 +477,8 @@ fn useMTREE(
         if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
         _ = archive.c.archive_write_finish_entry(writer);
 
-        try mdb.insert(txn, self.file_lkp, key, install_path);
-        try mdb.insert(txn, self.files_db, install_path, key);
+        try mdb.insert(self.alloc, txn, self.file_lkp, key, install_path);
+        try mdb.insert(self.alloc, txn, self.files_db, install_path, key);
     }
 }
 
