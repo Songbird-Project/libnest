@@ -107,13 +107,15 @@ test "Package Install" {
 
     const txn = try mdb.startTxn(&db);
 
-    const pkgs = try db.queryPkg(
+    const pkgs = try db.query(
+        Pkg,
+        db.installed_db,
         txn,
         pkg_name,
     );
     defer {
         for (pkgs) |pkg| {
-            pkg.pkg.deinit(alloc);
+            pkg.val.deinit(alloc);
         }
         alloc.free(pkgs);
     }
@@ -124,7 +126,7 @@ test "Package Install" {
     try db.install(
         &mirrors,
         pkgs[0].key,
-        pkgs[0].pkg,
+        pkgs[0].val,
         txn,
         "./tests",
         &cb,
