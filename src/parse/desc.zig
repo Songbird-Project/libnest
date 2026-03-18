@@ -11,7 +11,7 @@ pub fn index(
     desc: []const u8,
     repo: []const u8,
 ) !void {
-    const pkg = try parse(alloc, desc);
+    const pkg = try parse(alloc, repo, desc);
     defer pkg.deinit(alloc);
 
     const key = try mdb.makeKey(
@@ -20,16 +20,24 @@ pub fn index(
         pkg.name,
     );
     defer alloc.free(key);
-    try mdb.insert(
+    try mdb.insertJSON(
         alloc,
         txn,
         db.pkgs_db,
         key,
         pkg,
     );
+    for (pkg.provides) |virt| {
+        try mdb.insertRaw(
+            txn,
+            db.virt_db,
+            virt,
+            key,
+        );
+    }
 }
 
-pub fn parse(alloc: std.mem.Allocator, src: []const u8) !Pkg {
+pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !Pkg {
     var lines = std.mem.splitScalar(u8, src, '\n');
     var fields = std.StringHashMap([][]const u8).init(alloc);
 
@@ -89,6 +97,7 @@ pub fn parse(alloc: std.mem.Allocator, src: []const u8) !Pkg {
 
     return Pkg{
         .name = try alloc.dupe(u8, get(fields, "NAME")),
+        .repo = try alloc.dupe(u8, repo),
         .version = try alloc.dupe(u8, get(fields, "VERSION")),
         .description = try alloc.dupe(u8, get(fields, "DESC")),
         .build_date = try std.fmt.parseInt(i64, get(fields, "BUILDDATE"), 10),

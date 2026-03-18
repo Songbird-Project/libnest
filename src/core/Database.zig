@@ -20,8 +20,10 @@ const Db = @This();
 alloc: std.mem.Allocator,
 env: *mdb.c.MDB_env,
 pkgs_db: mdb.c.MDB_dbi,
+virt_db: mdb.c.MDB_dbi,
 files_db: mdb.c.MDB_dbi,
 installed_db: mdb.c.MDB_dbi,
+virt_installed_db: mdb.c.MDB_dbi,
 file_lkp: mdb.c.MDB_dbi,
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
@@ -45,6 +47,8 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
     var pkgs_db: mdb.c.MDB_dbi = undefined;
     var files_db: mdb.c.MDB_dbi = undefined;
     var installed_db: mdb.c.MDB_dbi = undefined;
+    var virt_db: mdb.c.MDB_dbi = undefined;
+    var virt_installed_db: mdb.c.MDB_dbi = undefined;
     var file_lkp: mdb.c.MDB_dbi = undefined;
 
     try mdb.checkCode(mdb.c.mdb_dbi_open(
@@ -52,6 +56,18 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
         "packages",
         mdb.c.MDB_CREATE,
         &pkgs_db,
+    ));
+    try mdb.checkCode(mdb.c.mdb_dbi_open(
+        txn.?,
+        "virtual",
+        mdb.c.MDB_CREATE | mdb.c.MDB_DUPSORT,
+        &virt_db,
+    ));
+    try mdb.checkCode(mdb.c.mdb_dbi_open(
+        txn.?,
+        "virtual_installed",
+        mdb.c.MDB_CREATE | mdb.c.MDB_DUPSORT,
+        &virt_installed_db,
     ));
     try mdb.checkCode(mdb.c.mdb_dbi_open(
         txn.?,
@@ -78,6 +94,8 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
         .alloc = alloc,
         .env = env.?,
         .pkgs_db = pkgs_db,
+        .virt_db = virt_db,
+        .virt_installed_db = virt_installed_db,
         .files_db = files_db,
         .installed_db = installed_db,
         .file_lkp = file_lkp,
@@ -86,6 +104,8 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
 
 pub fn deinit(self: *Db) void {
     mdb.c.mdb_dbi_close(self.env, self.pkgs_db);
+    mdb.c.mdb_dbi_close(self.env, self.virt_db);
+    mdb.c.mdb_dbi_close(self.env, self.virt_installed_db);
     mdb.c.mdb_dbi_close(self.env, self.files_db);
     mdb.c.mdb_dbi_close(self.env, self.installed_db);
     mdb.c.mdb_dbi_close(self.env, self.file_lkp);
@@ -139,20 +159,19 @@ pub fn queryLkpRepo(
     return pkgs.toOwnedSlice(self.alloc);
 }
 
-pub fn query(
+pub fn queryInstalled(
     self: *Db,
-    T: anytype,
     dbi: mdb.c.MDB_dbi,
     txn: *mdb.c.MDB_txn,
     name: []const u8,
-) ![]mdb.Response(T) {
+) ![]std.json.Parsed(Pkg.Installed) {
     var cursor: ?*mdb.c.MDB_cursor = null;
     try mdb.checkCode(
         mdb.c.mdb_cursor_open(txn, dbi, &cursor),
     );
     defer mdb.c.mdb_cursor_close(cursor);
 
-    var pkgs: std.ArrayList(mdb.Response(T)) = .empty;
+    var pkgs: std.ArrayList(std.json.Parsed(Pkg.Installed)) = .empty;
     defer pkgs.deinit(self.alloc);
 
     const name_delim = try std.fmt.allocPrint(
@@ -170,7 +189,7 @@ pub fn query(
         &mdb_val,
         mdb.c.MDB_SET_RANGE,
     )) catch |err| switch (err) {
-        error.NotFound => return &[_]mdb.Response(T){},
+        error.NotFound => return &[_]std.json.Parsed(Pkg.Installed){},
         else => {},
     };
 
@@ -186,16 +205,13 @@ pub fn query(
         if (!std.mem.startsWith(u8, pkg_key, name_delim)) break;
 
         const val = try std.json.parseFromSlice(
-            T,
+            Pkg.Installed,
             self.alloc,
             data,
             .{},
         );
 
-        try pkgs.append(self.alloc, .{
-            .key = pkg_key,
-            .val = val,
-        });
+        try pkgs.append(self.alloc, val);
 
         mdb.checkCode(mdb.c.mdb_cursor_get(
             cursor.?,
@@ -203,6 +219,124 @@ pub fn query(
             &mdb_val,
             mdb.c.MDB_NEXT,
         )) catch break;
+    }
+
+    return pkgs.toOwnedSlice(self.alloc);
+}
+
+pub fn queryPkg(
+    self: *Db,
+    comptime T: anytype,
+    txn: *mdb.c.MDB_txn,
+    name: []const u8,
+) ![]std.json.Parsed(T) {
+    if (T != Pkg and T != Pkg.Installed) return error.BadType;
+    const installed = if (T == Pkg.Installed) true else false;
+
+    const res_pkgs = try self.queryVirtPkgs(
+        txn,
+        name,
+        installed,
+    );
+    defer {
+        for (res_pkgs) |res| {
+            self.alloc.free(res);
+        }
+        self.alloc.free(res_pkgs);
+    }
+
+    const pkgs_db = if (installed) self.installed_db else self.pkgs_db;
+    var pkgs: std.ArrayList(std.json.Parsed(T)) = .empty;
+    defer pkgs.deinit(self.alloc);
+
+    for (res_pkgs) |p| {
+        var key: mdb.c.MDB_val = mdb.mdbVal(p);
+        var mdb_val: mdb.c.MDB_val = undefined;
+
+        mdb.checkCode(mdb.c.mdb_get(
+            txn,
+            pkgs_db,
+            &key,
+            &mdb_val,
+        )) catch continue;
+
+        const data = @as(
+            [*]const u8,
+            @ptrCast(mdb_val.mv_data),
+        )[0..mdb_val.mv_size];
+
+        const val = try std.json.parseFromSlice(
+            T,
+            self.alloc,
+            data,
+            .{},
+        );
+
+        try pkgs.append(self.alloc, val);
+    }
+
+    return pkgs.toOwnedSlice(self.alloc);
+}
+
+fn queryVirtPkgs(
+    self: *Db,
+    txn: *mdb.c.MDB_txn,
+    pkg: []const u8,
+    installed: bool,
+) ![][]const u8 {
+    const virt_db = if (installed) self.virt_installed_db else self.virt_db;
+
+    var cursor: ?*mdb.c.MDB_cursor = null;
+    try mdb.checkCode(
+        mdb.c.mdb_cursor_open(txn, virt_db, &cursor),
+    );
+    defer mdb.c.mdb_cursor_close(cursor);
+
+    var pkgs: std.ArrayList([]const u8) = .empty;
+    defer pkgs.deinit(self.alloc);
+
+    var key: mdb.c.MDB_val = mdb.mdbVal(pkg);
+    var mdb_val: mdb.c.MDB_val = undefined;
+
+    mdb.checkCode(mdb.c.mdb_cursor_get(
+        cursor.?,
+        &key,
+        &mdb_val,
+        mdb.c.MDB_SET,
+    )) catch |err| switch (err) {
+        error.NotFound => {
+            try pkgs.append(
+                self.alloc,
+                try self.alloc.dupe(u8, pkg),
+            );
+            return try pkgs.toOwnedSlice(self.alloc);
+        },
+        else => {},
+    };
+
+    while (true) {
+        const data = @as(
+            [*]const u8,
+            @ptrCast(mdb_val.mv_data),
+        )[0..mdb_val.mv_size];
+        const pkg_key = @as(
+            [*]const u8,
+            @ptrCast(key.mv_data),
+        )[0..key.mv_size];
+        if (!std.mem.eql(u8, pkg, pkg_key)) break;
+
+        try pkgs.append(self.alloc, try self.alloc.dupe(u8, data));
+
+        mdb.checkCode(mdb.c.mdb_cursor_get(
+            cursor.?,
+            &key,
+            &mdb_val,
+            mdb.c.MDB_NEXT_DUP,
+        )) catch break;
+    }
+
+    for (pkgs.items) |i| {
+        std.debug.print("{s}\n", .{i});
     }
 
     return pkgs.toOwnedSlice(self.alloc);
@@ -477,8 +611,8 @@ fn useMTREE(
         if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
         _ = archive.c.archive_write_finish_entry(writer);
 
-        try mdb.insert(self.alloc, txn, self.file_lkp, key, install_path);
-        try mdb.insert(self.alloc, txn, self.files_db, install_path, key);
+        try mdb.insertRaw(txn, self.file_lkp, key, install_path);
+        try mdb.insertRaw(txn, self.files_db, install_path, key);
     }
 }
 

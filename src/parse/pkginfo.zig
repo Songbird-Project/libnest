@@ -11,19 +11,31 @@ pub fn index(
     key: []const u8,
     path: []const u8,
 ) !void {
-    const pkg = try parse(alloc, path);
+    const delim = std.mem.indexOfScalar(u8, key, '@');
+    const repo: []const u8 = if (delim) |d| key[d + 1 ..] else "aur";
+
+    const pkg = try parse(alloc, repo, path);
     defer pkg.deinit(alloc);
 
-    try mdb.insert(
+    try mdb.insertJSON(
         alloc,
         txn,
         db.installed_db,
         key,
         pkg,
     );
+
+    for (pkg.provides) |p| {
+        try mdb.insertRaw(
+            txn,
+            db.virt_installed_db,
+            p,
+            key,
+        );
+    }
 }
 
-pub fn parse(alloc: std.mem.Allocator, path: []const u8) !Pkg.Installed {
+pub fn parse(alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.Installed {
     const pkginfo = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024);
     defer alloc.free(pkginfo);
 
@@ -32,7 +44,6 @@ pub fn parse(alloc: std.mem.Allocator, path: []const u8) !Pkg.Installed {
         var it = fields.iterator();
         while (it.next()) |entry| {
             alloc.free(entry.key_ptr.*);
-            // for (entry.value_ptr.*) |str| alloc.free(str);
             alloc.free(entry.value_ptr.*);
         }
         fields.deinit();
@@ -92,6 +103,7 @@ pub fn parse(alloc: std.mem.Allocator, path: []const u8) !Pkg.Installed {
 
     return Pkg.Installed{
         .name = try alloc.dupe(u8, get(fields, "pkgname")),
+        .repo = try alloc.dupe(u8, repo),
         .version = try alloc.dupe(u8, get(fields, "pkgver")),
         .description = try alloc.dupe(u8, get(fields, "pkgdesc")),
         .url = try alloc.dupe(u8, get(fields, "url")),
@@ -100,7 +112,11 @@ pub fn parse(alloc: std.mem.Allocator, path: []const u8) !Pkg.Installed {
         .build_date = try std.fmt.parseInt(i64, get(fields, "builddate"), 10),
         .size = try std.fmt.parseInt(i64, get(fields, "size"), 10),
         .license = try deepDupe(alloc, fields.get("license") orelse &.{}),
+        .conflicts = try deepDupe(alloc, fields.get("conflicts") orelse &.{}),
+        .provides = try deepDupe(alloc, fields.get("provides") orelse &.{}),
         .deps = try deepDupe(alloc, fields.get("depend") orelse &.{}),
+        .mkdeps = try deepDupe(alloc, fields.get("makedepend") orelse &.{}),
         .optdeps = try deepDupe(alloc, fields.get("optdepend") orelse &.{}),
+        .checkdeps = try deepDupe(alloc, fields.get("checkdepend") orelse &.{}),
     };
 }

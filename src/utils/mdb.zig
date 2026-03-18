@@ -6,13 +6,6 @@ pub const c = @cImport({
 const Pkg = @import("../core/Package.zig");
 const Db = @import("../core/Database.zig");
 
-pub fn Response(comptime T: type) type {
-    return struct {
-        key: []const u8,
-        val: std.json.Parsed(T),
-    };
-}
-
 pub const MDBError = error{
     Success,
     KeyExist,
@@ -103,7 +96,7 @@ pub fn endTxn(txn: *c.MDB_txn) !void {
     try checkCode(c.mdb_txn_commit(txn));
 }
 
-pub fn insert(
+pub fn insertJSON(
     alloc: std.mem.Allocator,
     txn: *c.MDB_txn,
     dbi: c.MDB_dbi,
@@ -117,6 +110,24 @@ pub fn insert(
 
     var mdb_key = mdbVal(key);
     var mdb_val = mdbVal(writer.written());
+
+    try checkCode(c.mdb_put(
+        txn,
+        dbi,
+        &mdb_key,
+        &mdb_val,
+        0,
+    ));
+}
+
+pub fn insertRaw(
+    txn: *c.MDB_txn,
+    dbi: c.MDB_dbi,
+    key: []const u8,
+    val: anytype,
+) !void {
+    var mdb_key = mdbVal(key);
+    var mdb_val = mdbVal(val);
 
     try checkCode(c.mdb_put(
         txn,
