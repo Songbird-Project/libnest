@@ -32,7 +32,7 @@ pub fn parse(alloc: std.mem.Allocator, path: []const u8) !Pkg.Installed {
         var it = fields.iterator();
         while (it.next()) |entry| {
             alloc.free(entry.key_ptr.*);
-            for (entry.value_ptr.*) |str| alloc.free(str);
+            // for (entry.value_ptr.*) |str| alloc.free(str);
             alloc.free(entry.value_ptr.*);
         }
         fields.deinit();
@@ -47,30 +47,30 @@ pub fn parse(alloc: std.mem.Allocator, path: []const u8) !Pkg.Installed {
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
         if (std.mem.indexOfScalar(u8, trimmed, '=')) |eql| {
-            const key = std.mem.trim(
-                u8,
-                trimmed[0..eql],
-                " \t\r",
-            );
-            const val = std.mem.trim(
-                u8,
-                trimmed[eql + 1 ..],
-                " \t\r",
-            );
+            const key = std.mem.trim(u8, trimmed[0..eql], " \t\r");
+            const val = std.mem.trim(u8, trimmed[eql + 1 ..], " \t\r");
 
             var parts = std.mem.splitScalar(u8, val, ',');
             while (parts.next()) |p| {
-                try current_values.append(alloc, try alloc.dupe(u8, std.mem.trim(
-                    u8,
-                    p,
-                    " \t\r",
-                )));
+                try current_values.append(alloc, std.mem.trim(u8, p, " \t\r"));
             }
 
-            try fields.put(
-                try alloc.dupe(u8, key),
-                try current_values.toOwnedSlice(alloc),
-            );
+            if (fields.getPtr(key)) |existing_values| {
+                const old_slice = existing_values.*;
+                const new_slice = try alloc.alloc([]const u8, old_slice.len + current_values.items.len);
+
+                @memcpy(new_slice[0..old_slice.len], old_slice);
+                @memcpy(new_slice[old_slice.len..], current_values.items);
+
+                alloc.free(old_slice); // Free the old slice container
+                existing_values.* = new_slice;
+                current_values.clearRetainingCapacity();
+            } else {
+                try fields.put(
+                    try alloc.dupe(u8, key),
+                    try current_values.toOwnedSlice(alloc),
+                );
+            }
         }
     }
 
