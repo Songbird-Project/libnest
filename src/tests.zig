@@ -104,30 +104,33 @@ test "Package Install" {
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
-    const pkg_name: []const u8 = "tree";
+    const pkg_name: []const u8 = "cargo";
 
     const txn = try mdb.startTxn(&db);
 
-    const pkgs = try db.query(
+    const pkgs = try db.queryPkg(
         Pkg,
-        db.pkgs_db,
         txn,
         pkg_name,
     );
     defer {
         for (pkgs) |pkg| {
-            pkg.val.deinit();
+            pkg.deinit();
         }
         alloc.free(pkgs);
     }
-    if (pkgs.len > 1) {
-        @panic("TODO: Handle more than 1 pkg");
-    }
+
+    const pkg = pkgs[0].value;
+    const key = try mdb.makeKey(
+        alloc,
+        pkg.repo,
+        pkg.name,
+    );
 
     try db.install(
         &mirrors,
-        pkgs[0].key,
-        pkgs[0].val.value,
+        key,
+        pkg,
         txn,
         "./tests",
         &cb,
