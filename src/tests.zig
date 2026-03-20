@@ -9,7 +9,7 @@ const AUR = struct {
     const Builder = @import("aur/Builder.zig");
 };
 
-const PKG_DB: []const u8 = "./tests/pkgs.db";
+const PREFIX: []const u8 = "./tests";
 const MIRRORS: []const u8 = "./tests/mirrors";
 
 fn cb(dlnow: f64, dltotal: f64) !void {
@@ -73,9 +73,8 @@ test "Sync Mirrors" {
     const alloc = gpa.allocator();
 
     const repos = [_][]const u8{ "core", "multilib", "extra" };
-    // const repos = [_][]const u8{"core"};
 
-    var db = try Db.init(alloc, PKG_DB);
+    var db = try Db.init(alloc, PREFIX);
     defer db.deinit();
 
     var mirrors = try MirrorList.init(alloc, MIRRORS);
@@ -84,7 +83,7 @@ test "Sync Mirrors" {
     for (repos) |repo| {
         try db.sync(
             &mirrors,
-            "./tests/",
+            PREFIX,
             repo,
             "x86_64",
             50_000,
@@ -98,19 +97,16 @@ test "Package Install" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var db = try Db.init(alloc, PKG_DB);
+    var db = try Db.init(alloc, PREFIX);
     defer db.deinit();
 
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
-    const pkg_name: []const u8 = "cargo";
-
-    const txn = try mdb.startTxn(&db);
+    const pkg_name: []const u8 = "gcc-libs";
 
     const pkgs = try db.queryPkg(
         Pkg,
-        txn,
         pkg_name,
     );
     defer {
@@ -121,19 +117,11 @@ test "Package Install" {
     }
 
     const pkg = pkgs[0].value;
-    const key = try mdb.makeKey(
-        alloc,
-        pkg.repo,
-        pkg.name,
-    );
 
     try db.install(
         &mirrors,
-        key,
         pkg,
-        txn,
-        "./tests",
+        PREFIX,
         &cb,
     );
-    try mdb.endTxn(txn);
 }
