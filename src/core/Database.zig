@@ -1,4 +1,5 @@
 const std = @import("std");
+const sqlite = @import("sqlite");
 
 const Downloader = @import("../net/Downloader.zig");
 const MirrorList = @import("../net/MirrorList.zig");
@@ -7,7 +8,6 @@ const Pkg = @import("Package.zig");
 const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
 const pkginfo = @import("../parse/pkginfo.zig");
-const mdb = @import("../utils/mdb.zig");
 
 const DbError = error{
     RelativePathInPkg,
@@ -18,328 +18,160 @@ const DbError = error{
 const Db = @This();
 
 alloc: std.mem.Allocator,
-env: *mdb.c.MDB_env,
-pkgs_db: mdb.c.MDB_dbi,
-virt_db: mdb.c.MDB_dbi,
-files_db: mdb.c.MDB_dbi,
-installed_db: mdb.c.MDB_dbi,
-virt_installed_db: mdb.c.MDB_dbi,
-file_lkp: mdb.c.MDB_dbi,
+db: *sqlite.Db,
 
-pub fn init(alloc: std.mem.Allocator, path: []const u8) !Db {
-    var env: ?*mdb.c.MDB_env = null;
-    try mdb.checkCode(mdb.c.mdb_env_create(&env));
-    errdefer mdb.c.mdb_env_close(env.?);
+pub fn init(alloc: std.mem.Allocator, prefix: []const u8) !Db {
+    const dbpath = try std.fs.path.joinZ(alloc, &.{ prefix, "pkgs.db" });
+    defer alloc.free(dbpath);
+    const db = try alloc.create(sqlite.Db);
+    db.* = try sqlite.Db.init(.{
+        .mode = .{ .File = dbpath },
+        .open_flags = .{
+            .write = true,
+            .create = true,
+        },
+        .threading_mode = .MultiThread,
+    });
+    errdefer alloc.destroy(db);
 
-    try mdb.checkCode(mdb.c.mdb_env_set_maxdbs(env.?, 7));
-    try mdb.checkCode(mdb.c.mdb_env_set_mapsize(env.?, 5 * 1024 * 1024 * 1024));
+    _ = try db.pragma(void, .{}, "foreign_keys", "ON");
+    _ = try db.pragma(void, .{}, "journal_mode", "WAL");
+    _ = try db.pragma(void, .{}, "cache_size", "-200000");
 
-    try mdb.checkCode(mdb.c.mdb_env_open(
-        env.?,
-        path.ptr,
-        mdb.c.MDB_NOSUBDIR,
-        0o644,
-    ));
-
-    var txn: ?*mdb.c.MDB_txn = undefined;
-    try mdb.checkCode(mdb.c.mdb_txn_begin(env.?, null, 0, &txn));
-
-    var pkgs_db: mdb.c.MDB_dbi = undefined;
-    var files_db: mdb.c.MDB_dbi = undefined;
-    var installed_db: mdb.c.MDB_dbi = undefined;
-    var virt_db: mdb.c.MDB_dbi = undefined;
-    var virt_installed_db: mdb.c.MDB_dbi = undefined;
-    var file_lkp: mdb.c.MDB_dbi = undefined;
-
-    try mdb.checkCode(mdb.c.mdb_dbi_open(
-        txn.?,
-        "packages",
-        mdb.c.MDB_CREATE,
-        &pkgs_db,
-    ));
-    try mdb.checkCode(mdb.c.mdb_dbi_open(
-        txn.?,
-        "virtual",
-        mdb.c.MDB_CREATE | mdb.c.MDB_DUPSORT,
-        &virt_db,
-    ));
-    try mdb.checkCode(mdb.c.mdb_dbi_open(
-        txn.?,
-        "virtual_installed",
-        mdb.c.MDB_CREATE | mdb.c.MDB_DUPSORT,
-        &virt_installed_db,
-    ));
-    try mdb.checkCode(mdb.c.mdb_dbi_open(
-        txn.?,
-        "files",
-        mdb.c.MDB_CREATE,
-        &files_db,
-    ));
-    try mdb.checkCode(mdb.c.mdb_dbi_open(
-        txn.?,
-        "installed",
-        mdb.c.MDB_CREATE,
-        &installed_db,
-    ));
-    try mdb.checkCode(mdb.c.mdb_dbi_open(
-        txn.?,
-        "file_lookup",
-        mdb.c.MDB_CREATE | mdb.c.MDB_DUPSORT,
-        &file_lkp,
-    ));
-
-    try mdb.checkCode(mdb.c.mdb_txn_commit(txn.?));
+    try db.execMulti(
+        \\CREATE TABLE IF NOT EXISTS packages(
+        \\ id INTEGER PRIMARY KEY,
+        \\ name TEXT NOT NULL,
+        \\ repo TEXT NOT NULL,
+        \\ metadata JSONB,
+        \\ UNIQUE(name,repo)
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS files(
+        \\ pkgid INTEGER NOT NULL,
+        \\ path TEXT,
+        \\ FOREIGN KEY(pkgid) REFERENCES packages(id) ON DELETE CASCADE
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS installed(
+        \\ id INTEGER PRIMARY KEY,
+        \\ name TEXT NOT NULL,
+        \\ repo TEXT NOT NULL,
+        \\ metadata JSONB,
+        \\ UNIQUE(name,repo)
+        \\);
+        \\
+        \\CREATE INDEX IF NOT EXISTS idx_install_path ON files(path);
+    , .{});
 
     return .{
         .alloc = alloc,
-        .env = env.?,
-        .pkgs_db = pkgs_db,
-        .virt_db = virt_db,
-        .virt_installed_db = virt_installed_db,
-        .files_db = files_db,
-        .installed_db = installed_db,
-        .file_lkp = file_lkp,
+        .db = db,
     };
 }
 
 pub fn deinit(self: *Db) void {
-    mdb.c.mdb_dbi_close(self.env, self.pkgs_db);
-    mdb.c.mdb_dbi_close(self.env, self.virt_db);
-    mdb.c.mdb_dbi_close(self.env, self.virt_installed_db);
-    mdb.c.mdb_dbi_close(self.env, self.files_db);
-    mdb.c.mdb_dbi_close(self.env, self.installed_db);
-    mdb.c.mdb_dbi_close(self.env, self.file_lkp);
-    mdb.c.mdb_env_close(self.env);
-}
-
-pub fn queryLkpRepo(
-    self: *Db,
-    txn: *mdb.c.MDB_txn,
-    dbi: mdb.c.MDB_dbi,
-    name: []const u8,
-) DbError![][]u8 {
-    var cursor: ?*mdb.c.MDB_cursor = null;
-    try mdb.checkCode(
-        mdb.c.mdb_cursor_open(txn, dbi, &cursor),
-    );
-    defer mdb.c.mdb_cursor_close(cursor);
-
-    var pkgs: std.ArrayList([]u8) = .empty;
-    defer pkgs.deinit(self.alloc);
-
-    var key: mdb.c.MDB_val = mdb.mdbVal(name);
-    var mdb_val: mdb.c.MDB_val = undefined;
-
-    mdb.checkCode(mdb.c.mdb_cursor_get(
-        cursor.?,
-        &key,
-        &mdb_val,
-        mdb.c.MDB_SET,
-    )) catch |err| switch (err) {
-        error.NotFound => return &[_]u8{},
-        else => {},
-    };
-
-    while (true) {
-        const data = @as([*]const u8, @ptrCast(mdb_val.mv_data))[0..mdb_val.mv_size];
-        const val = try self.alloc.dupe(u8, data);
-        try pkgs.append(
-            self.alloc,
-            val,
-        );
-
-        mdb.checkCode(mdb.c.mdb_cursor_get(
-            cursor.?,
-            &key,
-            &mdb_val,
-            mdb.c.MDB_NEXT,
-        )) catch break;
-    }
-
-    return pkgs.toOwnedSlice(self.alloc);
-}
-
-pub fn queryInstalled(
-    self: *Db,
-    dbi: mdb.c.MDB_dbi,
-    txn: *mdb.c.MDB_txn,
-    name: []const u8,
-) ![]std.json.Parsed(Pkg.Installed) {
-    var cursor: ?*mdb.c.MDB_cursor = null;
-    try mdb.checkCode(
-        mdb.c.mdb_cursor_open(txn, dbi, &cursor),
-    );
-    defer mdb.c.mdb_cursor_close(cursor);
-
-    var pkgs: std.ArrayList(std.json.Parsed(Pkg.Installed)) = .empty;
-    defer pkgs.deinit(self.alloc);
-
-    const name_delim = try std.fmt.allocPrint(
-        self.alloc,
-        "{s}@",
-        .{name},
-    );
-    defer self.alloc.free(name_delim);
-    var key: mdb.c.MDB_val = mdb.mdbVal(name_delim);
-    var mdb_val: mdb.c.MDB_val = undefined;
-
-    mdb.checkCode(mdb.c.mdb_cursor_get(
-        cursor.?,
-        &key,
-        &mdb_val,
-        mdb.c.MDB_SET_RANGE,
-    )) catch |err| switch (err) {
-        error.NotFound => return &[_]std.json.Parsed(Pkg.Installed){},
-        else => {},
-    };
-
-    while (true) {
-        const data = @as(
-            [*]const u8,
-            @ptrCast(mdb_val.mv_data),
-        )[0..mdb_val.mv_size];
-        const pkg_key = @as(
-            [*]const u8,
-            @ptrCast(key.mv_data),
-        )[0..key.mv_size];
-        if (!std.mem.startsWith(u8, pkg_key, name_delim)) break;
-
-        const val = try std.json.parseFromSlice(
-            Pkg.Installed,
-            self.alloc,
-            data,
-            .{},
-        );
-
-        try pkgs.append(self.alloc, val);
-
-        mdb.checkCode(mdb.c.mdb_cursor_get(
-            cursor.?,
-            &key,
-            &mdb_val,
-            mdb.c.MDB_NEXT,
-        )) catch break;
-    }
-
-    return pkgs.toOwnedSlice(self.alloc);
+    self.db.deinit();
+    self.alloc.destroy(self.db);
 }
 
 pub fn queryPkg(
     self: *Db,
-    comptime T: anytype,
-    txn: *mdb.c.MDB_txn,
+    comptime T: type,
     name: []const u8,
 ) ![]std.json.Parsed(T) {
-    if (T != Pkg and T != Pkg.Installed) return error.BadType;
-    const installed = if (T == Pkg.Installed) true else false;
+    const query_pkgs =
+        \\SELECT json(metadata) FROM packages
+        \\WHERE name = ? OR EXISTS (SELECT 1 FROM json_each(packages.metadata, '$.provides') WHERE value = ?)
+    ;
+    const query_inst =
+        \\SELECT json(metadata) FROM installed
+        \\WHERE name = ? OR EXISTS (SELECT 1 FROM json_each(installed.metadata, '$.provides') WHERE value = ?)
+    ;
 
-    const res_pkgs = try self.queryVirtPkgs(
-        txn,
-        name,
-        installed,
-    );
-    defer {
-        for (res_pkgs) |res| {
-            self.alloc.free(res);
-        }
-        self.alloc.free(res_pkgs);
+    var stmt = try if (T == Pkg.Installed)
+        self.db.prepare(query_inst)
+    else
+        self.db.prepare(query_pkgs);
+    defer stmt.deinit();
+
+    var results: std.ArrayList(std.json.Parsed(T)) = .empty;
+    errdefer {
+        for (results.items) |r| r.deinit();
+        results.deinit(self.alloc);
     }
 
-    const pkgs_db = if (installed) self.installed_db else self.pkgs_db;
-    var pkgs: std.ArrayList(std.json.Parsed(T)) = .empty;
-    defer pkgs.deinit(self.alloc);
+    var iter = try stmt.iterator(struct { metadata: []const u8 }, .{ name, name });
 
-    for (res_pkgs) |p| {
-        var key: mdb.c.MDB_val = mdb.mdbVal(p);
-        var mdb_val: mdb.c.MDB_val = undefined;
-
-        mdb.checkCode(mdb.c.mdb_get(
-            txn,
-            pkgs_db,
-            &key,
-            &mdb_val,
-        )) catch continue;
-
-        const data = @as(
-            [*]const u8,
-            @ptrCast(mdb_val.mv_data),
-        )[0..mdb_val.mv_size];
-
-        const val = try std.json.parseFromSlice(
+    while (try iter.nextAlloc(self.alloc, .{})) |row| {
+        const parsed = try std.json.parseFromSlice(
             T,
             self.alloc,
-            data,
-            .{},
+            row.metadata,
+            .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
         );
-
-        try pkgs.append(self.alloc, val);
+        try results.append(self.alloc, parsed);
+        self.alloc.free(row.metadata);
     }
 
-    return pkgs.toOwnedSlice(self.alloc);
+    return results.toOwnedSlice(self.alloc);
 }
 
-fn queryVirtPkgs(
+pub fn insert(
     self: *Db,
-    txn: *mdb.c.MDB_txn,
-    pkg: []const u8,
-    installed: bool,
-) ![][]const u8 {
-    const virt_db = if (installed) self.virt_installed_db else self.virt_db;
-
-    var cursor: ?*mdb.c.MDB_cursor = null;
-    try mdb.checkCode(
-        mdb.c.mdb_cursor_open(txn, virt_db, &cursor),
+    pkgid: i64,
+    path: []const u8,
+) !void {
+    var stmt = try self.db.prepare(
+        \\INSERT INTO files (path, pkgid) VALUES (?, ?)
+        ,
     );
-    defer mdb.c.mdb_cursor_close(cursor);
+    defer stmt.deinit();
 
-    var pkgs: std.ArrayList([]const u8) = .empty;
-    defer pkgs.deinit(self.alloc);
+    try stmt.exec(.{}, .{
+        path,
+        pkgid,
+    });
+}
 
-    var key: mdb.c.MDB_val = mdb.mdbVal(pkg);
-    var mdb_val: mdb.c.MDB_val = undefined;
+pub fn insertPkg(
+    self: *Db,
+    kind: enum { Sync, Installed },
+    repo: []const u8,
+    val: anytype,
+) !i64 {
+    var writer = std.io.Writer.Allocating.init(self.alloc);
+    const w = &writer.writer;
+    defer writer.deinit();
+    try std.json.Stringify.value(val, .{}, w);
 
-    mdb.checkCode(mdb.c.mdb_cursor_get(
-        cursor.?,
-        &key,
-        &mdb_val,
-        mdb.c.MDB_SET,
-    )) catch |err| switch (err) {
-        error.NotFound => {
-            try pkgs.append(
-                self.alloc,
-                try self.alloc.dupe(u8, pkg),
-            );
-            return try pkgs.toOwnedSlice(self.alloc);
-        },
-        else => {},
-    };
+    if (kind == .Installed) {
+        var stmt = try self.db.prepare(
+            \\INSERT INTO installed (name, repo, metadata) VALUES (?, ?, jsonb(?))
+            ,
+        );
+        defer stmt.deinit();
 
-    while (true) {
-        const data = @as(
-            [*]const u8,
-            @ptrCast(mdb_val.mv_data),
-        )[0..mdb_val.mv_size];
-        const pkg_key = @as(
-            [*]const u8,
-            @ptrCast(key.mv_data),
-        )[0..key.mv_size];
-        if (!std.mem.eql(u8, pkg, pkg_key)) break;
+        try stmt.exec(.{}, .{
+            val.name,
+            repo,
+            writer.written(),
+        });
+    } else {
+        var stmt = try self.db.prepare(
+            \\ INSERT INTO packages (name, repo, metadata) VALUES (?, ?, jsonb(?))
+            ,
+        );
+        defer stmt.deinit();
 
-        try pkgs.append(self.alloc, try self.alloc.dupe(u8, data));
-
-        mdb.checkCode(mdb.c.mdb_cursor_get(
-            cursor.?,
-            &key,
-            &mdb_val,
-            mdb.c.MDB_NEXT_DUP,
-        )) catch break;
+        try stmt.exec(.{}, .{
+            val.name,
+            repo,
+            writer.written(),
+        });
     }
 
-    for (pkgs.items) |i| {
-        std.debug.print("{s}\n", .{i});
-    }
-
-    return pkgs.toOwnedSlice(self.alloc);
+    return self.db.getLastInsertRowID();
 }
 
 pub fn sync(
@@ -351,10 +183,8 @@ pub fn sync(
     batch_size: usize,
     download_cb: ?*const Downloader.callback,
 ) !void {
+    var in_trans = false;
     var batched: usize = 0;
-    var txn: ?*mdb.c.MDB_txn = null;
-
-    errdefer if (txn) |t| mdb.c.mdb_txn_abort(t);
 
     var reader = try archive.Reader.init();
     defer reader.deinit();
@@ -418,24 +248,19 @@ pub fn sync(
         }
 
         if (is_desc) {
-            if (batched >= batch_size and txn != null) {
-                try mdb.checkCode(mdb.c.mdb_txn_commit(txn.?));
+            if (batched >= batch_size and in_trans) {
+                try self.db.exec("COMMIT", .{}, .{});
                 batched = 0;
-                txn = null;
+                in_trans = false;
             }
-            if (txn == null) {
-                try mdb.checkCode(mdb.c.mdb_txn_begin(
-                    self.env,
-                    null,
-                    0,
-                    &txn,
-                ));
+            if (!in_trans) {
+                try self.db.exec("BEGIN IMMEDIATE", .{}, .{});
+                in_trans = true;
             }
 
             try desc.index(
                 self.alloc,
                 self,
-                txn.?,
                 content.items,
                 repo,
             );
@@ -444,17 +269,18 @@ pub fn sync(
         }
     }
 
-    if (txn != null) {
-        try mdb.checkCode(mdb.c.mdb_txn_commit(txn.?));
+    if (in_trans) {
+        try self.db.exec("COMMIT", .{}, .{});
+        try self.db.exec("VACUUM", .{}, .{});
+        batched = 0;
+        in_trans = false;
     }
 }
 
 pub fn install(
     self: *Db,
     mirrors: *MirrorList,
-    key: []const u8,
     pkg: Pkg,
-    txn: *mdb.c.MDB_txn,
     prefix: ?[]const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
@@ -483,7 +309,6 @@ pub fn install(
     defer self.alloc.free(dest);
 
     try mirrors.downloadPkg(
-        key,
         pkg,
         dest,
         download_cb,
@@ -531,37 +356,33 @@ pub fn install(
         try writer.finishEntry();
     }
 
-    const mtree_path = try std.fs.path.join(self.alloc, &.{
-        cache,
-        ".MTREE",
-    });
-    defer self.alloc.free(mtree_path);
-    try useMTREE(
-        self,
-        txn,
-        key,
-        mtree_path,
-        prefix,
-    );
-
     const pkginfo_path = try std.fs.path.join(self.alloc, &.{
         cache,
         ".PKGINFO",
     });
     defer self.alloc.free(pkginfo_path);
-    try pkginfo.index(
+    const pkgid = try pkginfo.index(
         self.alloc,
         self,
-        txn,
-        key,
+        pkg.repo,
         pkginfo_path,
+    );
+
+    const mtree_path = try std.fs.path.join(self.alloc, &.{
+        cache,
+        ".MTREE",
+    });
+    defer self.alloc.free(mtree_path);
+    try self.useMTREE(
+        pkgid,
+        mtree_path,
+        prefix,
     );
 }
 
 fn useMTREE(
     self: *Db,
-    txn: *mdb.c.MDB_txn,
-    key: []const u8,
+    pkgid: i64,
     mtree_path: []const u8,
     prefix: ?[]const u8,
 ) !void {
@@ -611,64 +432,17 @@ fn useMTREE(
         if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
         _ = archive.c.archive_write_finish_entry(writer);
 
-        try mdb.insertRaw(txn, self.file_lkp, key, install_path);
-        try mdb.insertRaw(txn, self.files_db, install_path, key);
+        try self.insert(pkgid, path);
     }
 }
 
 pub fn uninstall(
     self: *Db,
-    txn: *mdb.c.MDB_txn,
-    pkg: mdb.c.MDB_val,
+    pkgname: []const u8,
+    repo: []const u8,
 ) !void {
-    const name = @as([*]const u8, @ptrCast(pkg.mv_data))[0..pkg.mv_size];
-    const pkg_files = try self.queryLkpRepo(
-        txn,
-        self.file_lkp,
-        name,
-    );
-    defer {
-        for (pkg_files) |f| {
-            self.alloc.free(f);
-        }
-        self.alloc.free(pkg_files);
-    }
-
-    for (pkg_files) |path| {
-        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
-            error.IsDir => try std.fs.cwd().deleteTree(path),
-            error.FileNotFound => {},
-            else => return err,
-        };
-
-        mdb.checkCode(mdb.c.mdb_del(
-            txn,
-            self.files_db,
-            &mdb.mdbVal(path),
-            null,
-        )) catch |err| switch (err) {
-            error.NotFound => {},
-            else => return err,
-        };
-    }
-
-    mdb.checkCode(mdb.c.mdb_del(
-        txn,
-        self.file_lkp,
-        &pkg,
-        null,
-    )) catch |err| switch (err) {
-        error.NotFound => {},
-        else => return err,
-    };
-
-    mdb.checkCode(mdb.c.mdb_del(
-        txn,
-        self.installed_db,
-        &pkg,
-        null,
-    )) catch |err| switch (err) {
-        error.NotFound => {},
-        else => return err,
-    };
+    try self.db.exec(
+        \\DELETE FROM installed WHERE name = ? AND repo = ?
+    , .{}, .{ pkgname, repo });
+    try self.db.exec("VACUUM;", .{}, .{});
 }

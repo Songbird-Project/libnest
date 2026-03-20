@@ -50,7 +50,6 @@ pub fn deinit(self: *MirrorList) void {
 
 pub fn downloadPkg(
     self: MirrorList,
-    name_repo: []const u8,
     pkg: Pkg,
     dest: []const u8,
     download_cb: ?*const Downloader.callback,
@@ -58,13 +57,10 @@ pub fn downloadPkg(
     var dl: Downloader = try .init(self.alloc, 3, download_cb);
     defer dl.deinit();
 
-    const name_repo_delim = std.mem.indexOfScalar(u8, name_repo, '@');
-    const repo = name_repo[name_repo_delim.? + 1 ..];
-
     for (self.mirrors) |mirror| {
         const url = try self.fmtMirrorURL(
             mirror,
-            repo,
+            pkg.repo,
             pkg.arch,
             pkg.filename,
         );

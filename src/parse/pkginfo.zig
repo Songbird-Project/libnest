@@ -7,32 +7,17 @@ const Pkg = @import("../core/Package.zig");
 pub fn index(
     alloc: std.mem.Allocator,
     db: *Db,
-    txn: *mdb.c.MDB_txn,
-    key: []const u8,
+    repo: []const u8,
     path: []const u8,
-) !void {
-    const delim = std.mem.indexOfScalar(u8, key, '@');
-    const repo: []const u8 = if (delim) |d| key[d + 1 ..] else "aur";
-
+) !i64 {
     const pkg = try parse(alloc, repo, path);
     defer pkg.deinit(alloc);
 
-    try mdb.insertJSON(
-        alloc,
-        txn,
-        db.installed_db,
-        key,
+    return try db.insertPkg(
+        .Installed,
+        repo,
         pkg,
     );
-
-    for (pkg.provides) |p| {
-        try mdb.insertRaw(
-            txn,
-            db.virt_installed_db,
-            p,
-            key,
-        );
-    }
 }
 
 pub fn parse(alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.Installed {

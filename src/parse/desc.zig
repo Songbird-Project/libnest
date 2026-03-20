@@ -7,34 +7,17 @@ const mdb = @import("../utils/mdb.zig");
 pub fn index(
     alloc: std.mem.Allocator,
     db: *Db,
-    txn: *mdb.c.MDB_txn,
     desc: []const u8,
     repo: []const u8,
 ) !void {
     const pkg = try parse(alloc, repo, desc);
     defer pkg.deinit(alloc);
 
-    const key = try mdb.makeKey(
-        alloc,
+    _ = try db.insertPkg(
+        .Sync,
         repo,
-        pkg.name,
-    );
-    defer alloc.free(key);
-    try mdb.insertJSON(
-        alloc,
-        txn,
-        db.pkgs_db,
-        key,
         pkg,
     );
-    for (pkg.provides) |virt| {
-        try mdb.insertRaw(
-            txn,
-            db.virt_db,
-            virt,
-            key,
-        );
-    }
 }
 
 pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !Pkg {
