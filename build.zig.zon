@@ -8,6 +8,10 @@
             .url = "https://github.com/jiacai2050/zig-curl/archive/refs/tags/v0.3.2.zip",
             .hash = "curl-0.3.2-P4tT4SXPAACuV6f5eyh4jG_1SspjWwMm_vRJfoKrQep5",
         },
+        .sqlite = .{
+            .url = "git+https://github.com/vrischmann/zig-sqlite#0b75ba276d34de3141ec1697e3ef7c836d7b38e7",
+            .hash = "sqlite-3.48.0-F2R_a8eODgD9X8XjvWlZ1K7C-tDuHae4FuShM2N-yIT2",
+        },
     },
     .paths = .{
         "build.zig",
