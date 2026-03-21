@@ -14,6 +14,7 @@ const DbError = error{
     RelativePathInMTREE,
     CorruptPkg,
     AlreadyInstalled,
+    PackageNotFound,
 };
 
 const Db = @This();
@@ -73,7 +74,7 @@ pub fn init(
     return .{
         .alloc = alloc,
         .db = db,
-        .arch = alloc.dupe(u8, arch),
+        .arch = try alloc.dupe(u8, arch),
     };
 }
 
@@ -90,11 +91,19 @@ pub fn queryPkg(
 ) ![]std.json.Parsed(T) {
     const query_pkgs =
         \\SELECT json(metadata) FROM packages
-        \\WHERE name = ? OR EXISTS (SELECT 1 FROM json_each(packages.metadata, '$.provides') WHERE value = ?)
+        \\WHERE name LIKE ? OR name = ?
+        \\OR EXISTS (
+        \\ SELECT 1 FROM json_each(packages.metadata, '$.provides')
+        \\ WHERE value LIKE ? OR value = ?
+        \\)
     ;
     const query_inst =
         \\SELECT json(metadata) FROM installed
-        \\WHERE name = ? OR EXISTS (SELECT 1 FROM json_each(installed.metadata, '$.provides') WHERE value = ?)
+        \\WHERE name LIKE ? OR name = ?
+        \\OR EXISTS (
+        \\ SELECT 1 FROM json_each(installed.metadata, '$.provides')
+        \\ WHERE value LIKE ? OR value = ?
+        \\)
     ;
 
     var stmt = try if (T == Pkg.Installed)
@@ -109,7 +118,19 @@ pub fn queryPkg(
         results.deinit(self.alloc);
     }
 
-    var iter = try stmt.iterator(struct { metadata: []const u8 }, .{ name, name });
+    const likename = try std.fmt.allocPrint(
+        self.alloc,
+        "{s}=%",
+        .{name},
+    );
+    defer self.alloc.free(likename);
+
+    var iter = try stmt.iterator(struct { metadata: []const u8 }, .{
+        likename,
+        name,
+        likename,
+        name,
+    });
 
     while (try iter.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
@@ -121,6 +142,11 @@ pub fn queryPkg(
         try results.append(self.alloc, parsed);
         self.alloc.free(row.metadata);
     }
+
+    // if (results.items.len <= 0) {
+    //     std.debug.print("{s}\n", .{name});
+    //     return error.PackageNotFound;
+    // }
 
     return results.toOwnedSlice(self.alloc);
 }
@@ -144,40 +170,22 @@ pub fn insert(
 
 pub fn insertPkg(
     self: *Db,
-    kind: enum { Sync, Installed },
     repo: []const u8,
     val: anytype,
+    stmt: anytype,
 ) !i64 {
+    errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
+
     var writer = std.io.Writer.Allocating.init(self.alloc);
     const w = &writer.writer;
     defer writer.deinit();
     try std.json.Stringify.value(val, .{}, w);
 
-    if (kind == .Installed) {
-        var stmt = try self.db.prepare(
-            \\INSERT INTO installed (name, repo, metadata) VALUES (?, ?, jsonb(?))
-            ,
-        );
-        defer stmt.deinit();
-
-        try stmt.exec(.{}, .{
-            val.name,
-            repo,
-            writer.written(),
-        });
-    } else {
-        var stmt = try self.db.prepare(
-            \\ INSERT INTO packages (name, repo, metadata) VALUES (?, ?, jsonb(?))
-            ,
-        );
-        defer stmt.deinit();
-
-        try stmt.exec(.{}, .{
-            val.name,
-            repo,
-            writer.written(),
-        });
-    }
+    try stmt.exec(.{}, .{
+        val.name,
+        repo,
+        writer.written(),
+    });
 
     return self.db.getLastInsertRowID();
 }
@@ -190,6 +198,16 @@ pub fn sync(
     batch_size: usize,
     download_cb: ?*const Downloader.callback,
 ) !void {
+    var stmt = try self.db.prepare(
+        \\INSERT INTO packages (name, repo, metadata)
+        \\VALUES (?, ?, jsonb(?))
+        \\ON CONFLICT(name, repo) DO UPDATE SET
+        \\metadata = excluded.metadata
+        \\WHERE metadata != excluded.metadata
+        ,
+    );
+    defer stmt.deinit();
+
     var in_trans = false;
     var batched: usize = 0;
 
@@ -208,6 +226,10 @@ pub fn sync(
     );
     defer self.alloc.free(dest);
 
+    std.fs.cwd().deleteFile(dest) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
     try mirrors.downloadDb(
         repo,
         self.arch,
@@ -270,7 +292,9 @@ pub fn sync(
                 self,
                 content.items,
                 repo,
+                &stmt,
             );
+            stmt.reset();
 
             batched += 1;
         }
@@ -291,6 +315,16 @@ pub fn install(
     prefix: ?[]const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
+    var stmt = try self.db.prepare(
+        \\INSERT INTO installed (name, repo, metadata)
+        \\VALUES (?, ?, jsonb(?))
+        \\ON CONFLICT(name, repo) DO UPDATE SET
+        \\metadata = excluded.metadata
+        \\WHERE metadata != excluded.metadata
+        ,
+    );
+    defer stmt.deinit();
+
     const pkgs = try self.queryPkg(Pkg.Installed, pkg.name);
     defer {
         for (pkgs) |p| {
@@ -388,7 +422,9 @@ pub fn install(
         self,
         pkg.repo,
         pkginfo_path,
+        &stmt,
     );
+    stmt.reset();
 
     const mtree_path = try std.fs.path.join(self.alloc, &.{
         cache,

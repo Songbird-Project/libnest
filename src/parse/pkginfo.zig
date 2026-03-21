@@ -9,14 +9,19 @@ pub fn index(
     db: *Db,
     repo: []const u8,
     path: []const u8,
+    stmt: anytype,
 ) !i64 {
-    const pkg = try parse(alloc, repo, path);
+    const pkg = try parse(
+        alloc,
+        repo,
+        path,
+    );
     defer pkg.deinit(alloc);
 
     return try db.insertPkg(
-        .Installed,
         repo,
         pkg,
+        stmt,
     );
 }
 

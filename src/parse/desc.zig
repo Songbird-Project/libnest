@@ -9,14 +9,15 @@ pub fn index(
     db: *Db,
     desc: []const u8,
     repo: []const u8,
+    stmt: anytype,
 ) !void {
     const pkg = try parse(alloc, repo, desc);
     defer pkg.deinit(alloc);
 
     _ = try db.insertPkg(
-        .Sync,
         repo,
         pkg,
+        stmt,
     );
 }
 
