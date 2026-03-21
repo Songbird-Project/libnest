@@ -13,14 +13,20 @@ const DbError = error{
     RelativePathInPkg,
     RelativePathInMTREE,
     CorruptPkg,
+    AlreadyInstalled,
 };
 
 const Db = @This();
 
 alloc: std.mem.Allocator,
 db: *sqlite.Db,
+arch: []const u8,
 
-pub fn init(alloc: std.mem.Allocator, prefix: []const u8) !Db {
+pub fn init(
+    alloc: std.mem.Allocator,
+    prefix: []const u8,
+    arch: []const u8,
+) !Db {
     const dbpath = try std.fs.path.joinZ(alloc, &.{ prefix, "pkgs.db" });
     defer alloc.free(dbpath);
     const db = try alloc.create(sqlite.Db);
@@ -67,12 +73,14 @@ pub fn init(alloc: std.mem.Allocator, prefix: []const u8) !Db {
     return .{
         .alloc = alloc,
         .db = db,
+        .arch = alloc.dupe(u8, arch),
     };
 }
 
 pub fn deinit(self: *Db) void {
     self.db.deinit();
     self.alloc.destroy(self.db);
+    self.alloc.free(self.arch);
 }
 
 pub fn queryPkg(
@@ -179,7 +187,6 @@ pub fn sync(
     mirrors: *MirrorList,
     dest_dir: []const u8,
     repo: []const u8,
-    arch: []const u8,
     batch_size: usize,
     download_cb: ?*const Downloader.callback,
 ) !void {
@@ -203,7 +210,7 @@ pub fn sync(
 
     try mirrors.downloadDb(
         repo,
-        arch,
+        self.arch,
         dest,
         download_cb,
     );
@@ -284,6 +291,21 @@ pub fn install(
     prefix: ?[]const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
+    const pkgs = try self.queryPkg(Pkg.Installed, pkg.name);
+    defer {
+        for (pkgs) |p| {
+            p.deinit();
+        }
+        self.alloc.free(pkgs);
+    }
+    const diff_ver = blk: {
+        for (pkgs) |p| {
+            if (std.mem.eql(u8, p.value.version, pkg.version)) continue else break :blk true;
+        }
+        break :blk false;
+    };
+    if (pkgs.len > 0 and !diff_ver) return error.AlreadyInstalled;
+
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
@@ -310,6 +332,7 @@ pub fn install(
 
     try mirrors.downloadPkg(
         pkg,
+        self.arch,
         dest,
         download_cb,
     );
@@ -342,9 +365,8 @@ pub fn install(
         });
         defer self.alloc.free(install_path);
 
-        try writer.writeHeader(entry, install_path);
-
         if (path_type == 0o100000) {
+            try writer.writeHeader(entry, install_path);
             while (true) {
                 const bytes = try reader.readData(&buf);
                 if (bytes <= 0) break;
