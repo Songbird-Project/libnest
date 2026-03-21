@@ -6,7 +6,7 @@ const EVR = struct {
     release: ?[]const u8,
 };
 
-fn parseEVR(evr: []u8) EVR {
+fn parseEVR(evr: []const u8) EVR {
     var epoch: []const u8 = "0";
     var version: []const u8 = evr;
     var release: ?[]const u8 = null;
@@ -24,7 +24,7 @@ fn parseEVR(evr: []u8) EVR {
         version = evr[s + 1 ..];
     }
 
-    if (std.mem.lastIndexOf(u8, version, '-')) |se| {
+    if (std.mem.lastIndexOfScalar(u8, version, '-')) |se| {
         release = version[se + 1 ..];
         version = version[0..se];
     }
@@ -42,23 +42,35 @@ fn rpmvercmp(a: []const u8, b: []const u8) i8 {
     var i: usize = 0;
     var j: usize = 0;
 
+    var last_i: usize = 0;
+    var last_j: usize = 0;
+
     while (i < a.len and j < b.len) {
         while (i < a.len and !std.ascii.isAlphanumeric(a[i])) : (i += 1) {}
         while (j < b.len and !std.ascii.isAlphanumeric(b[j])) : (j += 1) {}
+
         if (!(i < a.len and j < b.len)) break;
 
-        if (i != j) return if (i < j) -1 else 1;
+        const sep_a = i - last_i;
+        const sep_b = j - last_j;
+        if (sep_a != sep_b) {
+            return if (sep_a < sep_b) -1 else 1;
+        }
+
+        last_i = i;
+        last_j = j;
 
         const is_num = std.ascii.isDigit(a[i]);
+
         const si = i;
         const sj = j;
 
         if (is_num) {
-            while (i < a.len and !std.ascii.isDigit(a[i])) : (i += 1) {}
-            while (j < b.len and !std.ascii.isDigit(b[j])) : (j += 1) {}
+            while (i < a.len and std.ascii.isDigit(a[i])) : (i += 1) {}
+            while (j < b.len and std.ascii.isDigit(b[j])) : (j += 1) {}
         } else {
-            while (i < a.len and !std.ascii.isAlphabetic(a[i])) : (i += 1) {}
-            while (j < b.len and !std.ascii.isAlphabetic(b[j])) : (j += 1) {}
+            while (i < a.len and std.ascii.isAlphabetic(a[i])) : (i += 1) {}
+            while (j < b.len and std.ascii.isAlphabetic(b[j])) : (j += 1) {}
         }
 
         var seg_a = a[si..i];
@@ -72,47 +84,48 @@ fn rpmvercmp(a: []const u8, b: []const u8) i8 {
             while (seg_b.len > 0 and seg_b[0] == '0') seg_b = seg_b[1..];
 
             if (seg_a.len > seg_b.len) return 1;
-            if (seg_b.len > seg_a.len) return -1;
-
-            const ord = std.mem.order(u8, seg_a, seg_b);
-            if (ord != .eq) return if (ord == .lt) -1 else 1;
-        } else {
-            const ord = std.mem.order(u8, seg_a, seg_b);
-            if (ord != .eq) return if (ord == .lt) -1 else 1;
+            if (seg_a.len < seg_b.len) return -1;
         }
+
+        const ord = std.mem.order(u8, seg_a, seg_b);
+        if (ord != .eq) {
+            return if (ord == .lt) -1 else 1;
+        }
+
+        last_i = i;
+        last_j = j;
     }
 
-    if (i >= a.len or j >= b.len) return 0;
-    if (((i >= a.len) and !(j < b.len and std.ascii.isAlphabetic(b[j]))) or std.ascii.isAlphabetic(a[i])) {
+    if (i >= a.len and j >= b.len) return 0;
+
+    if ((i >= a.len and !(j < b.len and std.ascii.isAlphabetic(b[j]))) or (i < a.len and std.ascii.isAlphabetic(a[i]))) {
         return -1;
     } else {
         return 1;
     }
-
-    return 0;
 }
 
 /// Return:
 ///  -1: a < b
 ///   0: a = b
 ///   1: a > b
-pub fn cmp(a: []const u8, b: []const u8) i8 {
+pub fn cmp(a: ?[]const u8, b: ?[]const u8) i8 {
     if (a == null and b == null) {
         return 0;
     } else if (a == null) {
-        return 1;
-    } else if (b == null) {
         return -1;
+    } else if (b == null) {
+        return 1;
     }
 
-    if (std.mem.eql(u8, a, b)) return 0;
+    if (std.mem.eql(u8, a.?, b.?)) return 0;
 
-    const evr1 = parseEVR(&a);
-    const evr2 = parseEVR(&b);
+    const evr1 = parseEVR(a.?);
+    const evr2 = parseEVR(b.?);
 
     var ret: i8 = rpmvercmp(evr1.epoch, evr2.epoch);
     if (ret != 0) return ret;
-    ret == rpmvercmp(evr1.version, evr2.version);
+    ret = rpmvercmp(evr1.version, evr2.version);
     if (ret != 0) return ret;
     if (evr1.release != null and evr2.release != null)
         ret = rpmvercmp(evr1.release.?, evr2.release.?);
