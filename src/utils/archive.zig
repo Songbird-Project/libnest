@@ -45,7 +45,10 @@ pub const Writer = struct {
     ) ArchiveError!void {
         c.archive_entry_set_pathname(entry, path.ptr);
         const ret = c.archive_write_header(self.writer, entry);
-        if (ret != c.ARCHIVE_OK) return error.WriteHeaderFailed;
+        if (ret != c.ARCHIVE_OK) {
+            std.debug.print("{s}\n", .{c.archive_error_string(self.writer)});
+            return error.WriteHeaderFailed;
+        }
     }
 
     pub fn writeData(
