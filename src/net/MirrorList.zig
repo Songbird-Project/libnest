@@ -51,6 +51,7 @@ pub fn deinit(self: *MirrorList) void {
 pub fn downloadPkg(
     self: MirrorList,
     pkg: Pkg,
+    arch: []const u8,
     dest: []const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
@@ -61,7 +62,7 @@ pub fn downloadPkg(
         const url = try self.fmtMirrorURL(
             mirror,
             pkg.repo,
-            pkg.arch,
+            arch,
             pkg.filename,
         );
         defer self.alloc.free(url);
@@ -178,7 +179,7 @@ pub fn fmtDbURL(
 
     const db_url = try std.fmt.allocPrint(
         self.alloc,
-        "{s}/{s}.files",
+        "{s}/{s}.db",
         .{ url, name },
     );
 
