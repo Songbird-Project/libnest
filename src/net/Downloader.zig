@@ -18,6 +18,7 @@ fn write(
 }
 
 pub const callback = fn (f64, f64) anyerror!void;
+const DlResult = enum { success, retry };
 
 const Downloader = @This();
 
@@ -32,6 +33,7 @@ download_cb: ?*const Downloader.callback,
 
 const DownloadError = error{
     TooManyRetries,
+    UnexpectedHTTPCode,
 };
 
 pub fn init(
@@ -65,6 +67,28 @@ pub fn download(
     url: []const u8,
     dest: []const u8,
 ) !void {
+    self.retries = 0;
+
+    while (true) {
+        const res = try self.attemptDownload(url, dest);
+
+        switch (res) {
+            .success => return,
+            .retry => {
+                if (self.retries >= self.retry_limit) return error.TooManyRetries;
+                self.retries += 1;
+                try std.fs.cwd().deleteFile(dest);
+                continue;
+            },
+        }
+    }
+}
+
+pub fn attemptDownload(
+    self: *Downloader,
+    url: []const u8,
+    dest: []const u8,
+) !DlResult {
     self.client.reset();
 
     var headers: curl.Easy.Headers = .{};
@@ -105,12 +129,15 @@ pub fn download(
     else
         try std.fs.cwd().createFile(
             dest,
-            .{},
+            .{ .truncate = (partial_size == 0), .read = true },
         );
-    defer file.close();
+    defer {
+        file.sync() catch {};
+        file.close();
+    }
 
     if (partial_exists) {
-        try file.seekTo(partial_size);
+        try file.seekFromEnd(0);
     }
 
     const usable_url = try self.alloc.dupeZ(u8, url);
@@ -147,31 +174,14 @@ pub fn download(
         (response.status_code == 206 and partial_exists))
     {
         self.retries = 0;
-        return;
+        return .success;
     }
 
     if (response.status_code == 416) {
-        if (try response.getHeader("Content-Range")) |cr_header| {
-            const range_delim = std.mem.indexOfScalar(u8, cr_header.get(), '/');
-            const length = try std.fmt.parseInt(
-                usize,
-                cr_header.get()[range_delim.? + 1 ..],
-                10,
-            );
-            if (partial_size == length) return;
-        }
-
-        if (self.retries == self.retry_limit) {
-            return error.TooManyRetries;
-        }
-
-        try std.fs.cwd().deleteFile(dest);
-        self.retries += 1;
-        try self.download(
-            url,
-            dest,
-        );
+        return .retry;
     }
+
+    return error.UnexpectedHTTPCode;
 }
 
 pub fn cb_wrapper(
