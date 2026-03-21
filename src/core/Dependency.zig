@@ -11,40 +11,37 @@ pub const Constraint = enum {
 
 const Dependency = @This();
 
-alloc: std.mem.Allocator,
 name: []const u8,
 version: ?[]const u8,
 constraint: Constraint = .none,
 
-pub fn new(
+pub fn parse(
     dep: []const u8,
 ) Dependency {
     var name = dep;
     var version: ?[]const u8 = null;
     var constraint: Constraint = .none;
 
-    if (std.mem.indexOf(u8, version, '>')) |idx| {
+    if (std.mem.indexOf(u8, dep, ">=")) |idx| {
+        constraint = .gte;
+        name = dep[0..idx];
+        version = dep[idx + 2 ..];
+    } else if (std.mem.indexOf(u8, dep, "<=")) |idx| {
+        constraint = .lte;
+        name = dep[0..idx];
+        version = dep[idx + 2 ..];
+    } else if (std.mem.indexOfScalar(u8, dep, '>')) |idx| {
         constraint = .gt;
-        version = name[idx + 1 ..];
-        name = name[0..idx];
-
-        if (std.mem.indexOf(u8, version, '=')) {
-            constraint = .gte;
-            version = version[1..];
-        }
-    } else if (std.mem.indexOf(u8, version, '<')) |idx| {
+        name = dep[0..idx];
+        version = dep[idx + 1 ..];
+    } else if (std.mem.indexOfScalar(u8, dep, '<')) |idx| {
         constraint = .lt;
-        version = name[idx + 1 ..];
-        name = name[0..idx];
-
-        if (std.mem.indexOf(u8, version, '=')) {
-            constraint = .lte;
-            version = version[1..];
-        }
-    } else if (std.mem.indexOf(u8, version, '=')) |idx| {
-        constraint = .eq;
-        version = name[idx + 1 ..];
-        name = name[0..idx];
+        name = dep[0..idx];
+        version = dep[idx + 1 ..];
+    } else if (std.mem.indexOfScalar(u8, dep, '=')) |idx| {
+        constraint = .eql;
+        name = dep[0..idx];
+        version = dep[idx + 1 ..];
     }
 
     return .{
@@ -54,7 +51,13 @@ pub fn new(
     };
 }
 
-pub fn deinit(self: Dependency) void {
-    _ = self;
-    return;
+pub fn checkVer(con: Constraint, cmp: i8) bool {
+    return switch (con) {
+        .eql => cmp == 0,
+        .gt => cmp == 1,
+        .lt => cmp == -1,
+        .gte => cmp == 0 or cmp == 1,
+        .lte => cmp == 0 or cmp == -1,
+        .none => true,
+    };
 }
