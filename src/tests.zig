@@ -16,14 +16,17 @@ const MIRRORS: []const u8 = "./tests/mirrors";
 const ARCH: []const u8 = "x86_64";
 
 fn installWithDeps(
+    alloc: std.mem.Allocator,
     db: *Db,
     mirrors: *MirrorList,
     pkg: Pkg,
+    installed: *std.StringHashMap(void),
     prefix: ?[]const u8,
     download_cb: ?*const Downloader.callback,
 ) !void {
     for (pkg.deps) |d| {
         const dep = Dep.parse(d);
+        if (installed.contains(dep.name)) continue;
 
         const pkgs = try db.queryPkg(Pkg, dep.name);
         defer {
@@ -33,13 +36,27 @@ fn installWithDeps(
             db.alloc.free(pkgs);
         }
         const p = pkgs[0].value;
-        const cmp = version.cmp(p.version, dep.version);
+
+        var ver: ?[]const u8 = p.version;
+        if (!std.mem.eql(u8, dep.name, p.name)) {
+            for (p.provides) |provided| {
+                const prov = Dep.parse(provided);
+                if (std.mem.eql(u8, dep.name, prov.name)) {
+                    ver = prov.version;
+                }
+            }
+        }
+
+        const cmp = version.cmp(ver, dep.version);
         if (!Dep.checkVer(dep.constraint, cmp)) return error.UnsatisfiedDependency;
 
+        try installed.put(try alloc.dupe(u8, dep.name), {});
         try installWithDeps(
+            alloc,
             db,
             mirrors,
             p,
+            installed,
             prefix,
             download_cb,
         );
@@ -111,7 +128,7 @@ test "AUR Build" {
     }
 }
 
-test "Sync Mirrors" {
+test "Sync Databases" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -144,17 +161,17 @@ test "Package Install" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var db = try Db.init(alloc, PREFIX);
-    defer db.deinit();
-
-    var mirrors = try MirrorList.init(
+    var db = try Db.init(
         alloc,
-        MIRRORS,
+        PREFIX,
         ARCH,
     );
+    defer db.deinit();
+
+    var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
 
-    const pkg_name: []const u8 = "tree";
+    const pkg_name: []const u8 = "cargo";
 
     const pkgs = try db.queryPkg(
         Pkg,
@@ -169,10 +186,21 @@ test "Package Install" {
 
     const pkg = pkgs[0].value;
 
+    var installed = std.StringHashMap(void).init(db.alloc);
+    defer {
+        var it = installed.keyIterator();
+        while (it.next()) |k| {
+            db.alloc.free(k.*);
+        }
+        installed.deinit();
+    }
+
     try installWithDeps(
+        alloc,
         &db,
         &mirrors,
         pkg,
+        &installed,
         PREFIX,
         &cb,
     );
