@@ -1,8 +1,10 @@
 const std = @import("std");
-const mdb = @import("utils/mdb.zig");
+const version = @import("core/version.zig");
 
 const Pkg = @import("core/Package.zig");
 const MirrorList = @import("net/MirrorList.zig");
+const Downloader = @import("net/Downloader.zig");
+const Dep = @import("core/Dependency.zig");
 const Db = @import("core/Database.zig");
 const AUR = struct {
     const Client = @import("aur/Client.zig");
@@ -11,6 +13,48 @@ const AUR = struct {
 
 const PREFIX: []const u8 = "./tests";
 const MIRRORS: []const u8 = "./tests/mirrors";
+const ARCH: []const u8 = "x86_64";
+
+fn installWithDeps(
+    db: *Db,
+    mirrors: *MirrorList,
+    pkg: Pkg,
+    prefix: ?[]const u8,
+    download_cb: ?*const Downloader.callback,
+) !void {
+    for (pkg.deps) |d| {
+        const dep = Dep.parse(d);
+
+        const pkgs = try db.queryPkg(Pkg, dep.name);
+        defer {
+            for (pkgs) |p| {
+                p.deinit();
+            }
+            db.alloc.free(pkgs);
+        }
+        const p = pkgs[0].value;
+        const cmp = version.cmp(p.version, dep.version);
+        if (!Dep.checkVer(dep.constraint, cmp)) return error.UnsatisfiedDependency;
+
+        try installWithDeps(
+            db,
+            mirrors,
+            p,
+            prefix,
+            download_cb,
+        );
+    }
+
+    db.install(
+        mirrors,
+        pkg,
+        prefix,
+        download_cb,
+    ) catch |err| switch (err) {
+        error.AlreadyInstalled => {},
+        else => return err,
+    };
+}
 
 fn cb(dlnow: f64, dltotal: f64) !void {
     const bar_width: usize = 10;
@@ -74,7 +118,11 @@ test "Sync Mirrors" {
 
     const repos = [_][]const u8{ "core", "multilib", "extra" };
 
-    var db = try Db.init(alloc, PREFIX);
+    var db = try Db.init(
+        alloc,
+        PREFIX,
+        ARCH,
+    );
     defer db.deinit();
 
     var mirrors = try MirrorList.init(alloc, MIRRORS);
@@ -85,7 +133,6 @@ test "Sync Mirrors" {
             &mirrors,
             PREFIX,
             repo,
-            "x86_64",
             50_000,
             &cb,
         );
@@ -100,10 +147,14 @@ test "Package Install" {
     var db = try Db.init(alloc, PREFIX);
     defer db.deinit();
 
-    var mirrors = try MirrorList.init(alloc, MIRRORS);
+    var mirrors = try MirrorList.init(
+        alloc,
+        MIRRORS,
+        ARCH,
+    );
     defer mirrors.deinit();
 
-    const pkg_name: []const u8 = "gcc-libs";
+    const pkg_name: []const u8 = "tree";
 
     const pkgs = try db.queryPkg(
         Pkg,
@@ -118,7 +169,8 @@ test "Package Install" {
 
     const pkg = pkgs[0].value;
 
-    try db.install(
+    try installWithDeps(
+        &db,
         &mirrors,
         pkg,
         PREFIX,
