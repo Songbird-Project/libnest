@@ -120,7 +120,10 @@ test "AUR Build" {
     defer json_res.deinit();
     const res = json_res.value;
 
-    var b = try AUR.Builder.init(alloc);
+    var b = try AUR.Builder.init(
+        alloc,
+        "/home/dds/Desktop/Projects/Zig/libs/libnest/scripts/makepkg",
+    );
     defer b.deinit();
 
     for (res.results) |result| {
