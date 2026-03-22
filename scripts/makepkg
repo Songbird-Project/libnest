@@ -1,7 +1,8 @@
 #!/usr/bin/bash
 #
-#   makepkg - make packages compatible for use with pacman
+#   makepkg - make packages from PKGBUILDs
 #
+#   Copyright (c) 2026 Songbird-Project <vaelixd@proton.me>
 #   Copyright (c) 2006-2025 Pacman Development Team <pacman-dev@lists.archlinux.org>
 #   Copyright (c) 2002-2006 by Judd Vinet <jvinet@zeroflux.org>
 #   Copyright (c) 2005 by Aurelien Foret <orelien@chez.com>
@@ -27,7 +28,7 @@
 # makepkg uses quite a few external programs during its execution. You
 # need to have at least the following installed for makepkg to function:
 #   awk, bsdtar (libarchive), bzip2, coreutils, fakeroot, file, find (findutils),
-#   gettext, gpg, grep, gzip, sed, tput (ncurses), xz
+#   gettext, gpg, grep, gzip, sed, tput (ncurses), xz, sqlite3
 
 # gettext initialization
 export TEXTDOMAIN='pacman-scripts'
@@ -40,11 +41,13 @@ unset CDPATH
 # Ensure GREP_OPTIONS doesn't screw with our grep calls
 unset GREP_OPTIONS
 
-declare -r makepkg_version='7.1.0'
+declare -r makepkg_version='7.1.0-libnest'
 declare -r confdir='/etc'
 declare -r BUILDSCRIPT='PKGBUILD'
 
 MAKEPKG_LIBRARY=${MAKEPKG_LIBRARY:-'/usr/share/makepkg'}
+LIBNEST_PATH=${LIBNEST_PATH:-'/etc/nest/'}
+LIBNEST_DB=${LIBNEST_DB:-'pkgs.db'}
 
 # Options
 ASDEPS=0
@@ -81,8 +84,6 @@ SOURCEONLY=0
 VERIFYSOURCE=0
 
 MAKEPKG_LINT_PKGBUILD=${MAKEPKG_LINT_PKGBUILD:-1}
-
-PACMAN_OPTS=()
 
 shopt -s extglob
 
@@ -225,49 +226,18 @@ missing_source_file() {
   exit $E_MISSING_FILE
 }
 
-run_pacman() {
-  local cmd cmdescape
-  if [[ $1 = -@(T|Q)*([[:alpha:]]) ]]; then
-    cmd=("$PACMAN_PATH" "$@")
-  else
-    cmd=("$PACMAN_PATH" "${PACMAN_OPTS[@]}" "$@")
-    cmdescape="$(printf '%q ' "${cmd[@]}")"
-    if ((${#PACMAN_AUTH[@]})); then
-      if in_array '%c' "${PACMAN_AUTH[@]}"; then
-        cmd=("${PACMAN_AUTH[@]/\%c/$cmdescape}")
-      else
-        cmd=("${PACMAN_AUTH[@]}" "${cmd[@]}")
-      fi
-    elif type -p sudo >/dev/null; then
-      cmd=(sudo -k "${cmd[@]}")
-    else
-      cmd=(su root -c "$cmdescape")
-    fi
-    local lockfile="$(pacman-conf DBPath)/db.lck"
-    while [[ -f $lockfile ]]; do
-      local timer=0
-      msg "$(gettext "Pacman is currently in use, please wait...")"
-      while [[ -f $lockfile ]] && ((timer < 10)); do
-        ((++timer))
-        sleep 3
-      done
-    done
-  fi
-  "${cmd[@]}"
-}
-
 check_deps() {
   (($# > 0)) || return 0
 
   local ret=0
   local pmout
-  pmout=$(run_pacman -T "$@")
+  pmout=$(check_missing "$@")
   ret=$?
 
   if ((ret == 127)); then #unresolved deps
     printf "%s\n" "$pmout"
   elif ((ret)); then
-    error "$(gettext "'%s' returned a fatal error (%i): %s")" "$PACMAN" "$ret" "$pmout"
+    error "$(gettext "'%s' returned a fatal error (%i): %s")" "lmdb" "$ret" "$pmout"
     return "$ret"
   fi
 }
@@ -662,11 +632,16 @@ write_buildinfo() {
   write_kv_pair "buildenv" "${BUILDENV[@]}"
   write_kv_pair "options" "${OPTIONS[@]}"
 
-  local pkginfos_parsed=($(LC_ALL=C run_pacman -Qi | awk -F': ' '\
-		/^Name .*/ {printf "%s", $2} \
-		/^Version .*/ {printf "-%s", $2} \
-		/^Architecture .*/ {print "-"$2} \
-		'))
+  mapfile -t pkginfos_parsed < <(
+    sqlite3 "$LIBNEST_PATH/$LIBNEST_DB" "
+    SELECT
+      name || '-' ||
+      IFNULL(json_extract(metadata, '\$.version'), 'unknown') || '-' ||
+      IFNULL(json_extract(metadata, '\$.arch'), 'any')
+    FROM installed
+    ORDER BY name;
+  "
+  )
 
   write_kv_pair "installed" "${pkginfos_parsed[@]}"
 }
@@ -863,41 +838,6 @@ create_srcpackage() {
   rm -rf "${srclinks}"
 }
 
-install_package() {
-  ((!INSTALL)) && return 0
-
-  remove_deps || return $?
-  RMDEPS=0
-
-  if ((!SPLITPKG)); then
-    msg "$(gettext "Installing package %s with %s...")" "$pkgname" "$PACMAN -U"
-  else
-    msg "$(gettext "Installing %s package group with %s...")" "$pkgbase" "$PACMAN -U"
-  fi
-
-  local fullver pkgarch pkg pkglist
-  ((ASDEPS)) && pkglist+=('--asdeps')
-  ((NEEDED)) && pkglist+=('--needed')
-
-  for pkg in ${pkgname[@]}; do
-    fullver=$(get_full_version)
-    # Split package not relevant for current CARCH
-    if ! pkgarch=$(get_pkg_arch $pkg); then
-      continue
-    fi
-    pkglist+=("$PKGDEST/${pkg}-${fullver}-${pkgarch}${PKGEXT}")
-
-    if [[ -f "$PKGDEST/${pkg}-debug-${fullver}-${pkgarch}${PKGEXT}" ]]; then
-      pkglist+=("$PKGDEST/${pkg}-debug-${fullver}-${pkgarch}${PKGEXT}")
-    fi
-  done
-
-  if ! run_pacman -U "${pkglist[@]}"; then
-    warning "$(gettext "Failed to install built package(s).")"
-    return $E_INSTALL_FAILED
-  fi
-}
-
 check_build_status() {
   local fullver pkgarch allpkgbuilt somepkgbuilt
   if ((!SPLITPKG)); then
@@ -905,14 +845,8 @@ check_build_status() {
     pkgarch=$(get_pkg_arch)
     if [[ -f $PKGDEST/${pkgname}-${fullver}-${pkgarch}${PKGEXT} ]] &&
       ! ((FORCE || SOURCEONLY || NOBUILD || NOARCHIVE)); then
-      if ((INSTALL)); then
-        warning "$(gettext "A package has already been built, installing existing package...")"
-        install_package
-        exit $?
-      else
-        error "$(gettext "A package has already been built. (use %s to overwrite)")" "-f"
-        exit $E_ALREADY_BUILT
-      fi
+      error "$(gettext "A package has already been built. (use %s to overwrite)")" "-f"
+      exit $E_ALREADY_BUILT
     fi
   else
     allpkgbuilt=1
@@ -931,14 +865,8 @@ check_build_status() {
     done
     if ! ((FORCE || SOURCEONLY || NOBUILD || NOARCHIVE)); then
       if ((allpkgbuilt)); then
-        if ((INSTALL)); then
-          warning "$(gettext "The package group has already been built, installing existing packages...")"
-          install_package
-          exit $?
-        else
-          error "$(gettext "The package group has already been built. (use %s to overwrite)")" "-f"
-          exit $E_ALREADY_BUILT
-        fi
+        error "$(gettext "The package group has already been built. (use %s to overwrite)")" "-f"
+        exit $E_ALREADY_BUILT
       fi
       if ((somepkgbuilt && !PKGVERFUNC)); then
         error "$(gettext "Part of the package group has already been built. (use %s to overwrite)")" "-f"
@@ -997,9 +925,9 @@ run_split_packaging() {
 }
 
 usage() {
-  printf "makepkg (pacman) %s\n" "$makepkg_version"
+  printf "makepkg (libnest) %s\n" "$makepkg_version"
   echo
-  printf -- "$(gettext "Make packages compatible for use with pacman")\n"
+  printf -- "$(gettext "Make packages compatible for use with libnest")\n"
   echo
   printf -- "$(gettext "Usage: %s [options]")\n" "$0"
   echo
@@ -1020,7 +948,6 @@ usage() {
   printf -- "$(gettext "  -p <file>        Use an alternate build script (instead of '%s')")\n" "$BUILDSCRIPT"
   printf -- "$(gettext "  -r, --rmdeps     Remove installed dependencies after a successful build")\n"
   printf -- "$(gettext "  -R, --repackage  Repackage contents of the package without rebuilding")\n"
-  printf -- "$(gettext "  -s, --syncdeps   Install missing dependencies with %s")\n" "pacman"
   printf -- "$(gettext "  -S, --source     Generate a source-only tarball without downloaded sources")\n"
   printf -- "$(gettext "  -V, --version    Show version information and exit")\n"
   printf -- "$(gettext "  --allsource      Generate a source-only tarball including downloaded sources")\n"
@@ -1040,19 +967,13 @@ usage() {
   printf -- "$(gettext "  --skippgpcheck   Do not verify source files with PGP signatures")\n"
   printf -- "$(gettext "  --verifysource   Download source files (if needed) and perform integrity checks")\n"
   echo
-  printf -- "$(gettext "These options can be passed to %s:")\n" "pacman"
-  echo
-  printf -- "$(gettext "  --asdeps         Install packages as non-explicitly installed")\n"
-  printf -- "$(gettext "  --needed         Do not reinstall the targets that are already up to date")\n"
-  printf -- "$(gettext "  --noconfirm      Do not ask for confirmation when resolving dependencies")\n"
-  printf -- "$(gettext "  --noprogressbar  Do not show a progress bar when downloading files")\n"
-  echo
   printf -- "$(gettext "If %s is not specified, %s will look for '%s'")\n" "-p" "makepkg" "$BUILDSCRIPT"
   echo
 }
 
 version() {
-  printf "makepkg (pacman) %s\n" "$makepkg_version"
+  printf "makepkg (libnest) %s\n" "$makepkg_version"
+  printf -- "Copyright (c) 2026 Songbird-Project <vaelixd@proton.me>.\n"
   printf -- "Copyright (c) 2006-2025 Pacman Development Team <pacman-dev@lists.archlinux.org>.\n"
   printf -- "Copyright (C) 2002-2006 Judd Vinet <jvinet@zeroflux.org>.\n"
   printf '\n'
@@ -1083,9 +1004,6 @@ OPT_LONG=('allsource' 'check' 'clean' 'cleanbuild' 'config:' 'dir:' 'force' 'gen
   'printsrcinfo' 'repackage' 'rmdeps' 'sign' 'skipchecksums' 'skipinteg'
   'skippgpcheck' 'source' 'syncdeps' 'verifysource' 'version')
 
-# Pacman Options
-OPT_LONG+=('asdeps' 'noconfirm' 'needed' 'noprogressbar')
-
 if ! parseopts "$OPT_SHORT" "${OPT_LONG[@]}" -- "$@"; then
   exit $E_INVALID_OPTION
 fi
@@ -1094,12 +1012,6 @@ unset OPT_SHORT OPT_LONG OPTRET
 
 while true; do
   case "$1" in
-  # Pacman Options
-  --asdeps) ASDEPS=1 ;;
-  --needed) NEEDED=1 ;;
-  --noconfirm) PACMAN_OPTS+=("--noconfirm") ;;
-  --noprogressbar) PACMAN_OPTS+=("--noprogressbar") ;;
-
   # Makepkg Options
   --allsource) BUILDPKG=0 SOURCEONLY=2 ;;
   -A | --ignorearch) IGNOREARCH=1 ;;
@@ -1121,7 +1033,6 @@ while true; do
   # generating integrity checks does not depend on architecture
   -g | --geninteg) BUILDPKG=0 GENINTEG=1 IGNOREARCH=1 ;;
   --holdver) HOLDVER=1 ;;
-  -i | --install) INSTALL=1 ;;
   --key)
     shift
     GPGKEY=$1
@@ -1129,7 +1040,6 @@ while true; do
   -L | --log) LOGGING=1 ;;
   -m | --nocolor)
     USE_COLOR='n'
-    PACMAN_OPTS+=("--color" "never")
     ;;
   --noarchive) NOARCHIVE=1 ;;
   --nocheck) RUN_CHECK='n' ;;
@@ -1152,7 +1062,6 @@ while true; do
     SKIPPGPCHECK=1
     ;;
   --skippgpcheck) SKIPPGPCHECK=1 ;;
-  -s | --syncdeps) DEP_BIN=1 ;;
   -S | --source) BUILDPKG=0 SOURCEONLY=1 ;;
   --verifysource) BUILDPKG=0 VERIFYSOURCE=1 ;;
 
@@ -1210,11 +1119,6 @@ for var in PKGDEST SRCDEST SRCPKGDEST LOGDEST BUILDDIR; do
 done
 unset var
 PACKAGER=${PACKAGER:-"Unknown Packager"}
-
-# set pacman command if not already defined
-PACMAN=${PACMAN:-pacman}
-# save full path to command as PATH may change when sourcing /etc/profile
-PACMAN_PATH=$(type -P $PACMAN)
 
 # check if messages are to be printed using color
 if [[ -t 2 && $USE_COLOR != "n" ]] && check_buildenv "color" "y"; then
@@ -1462,7 +1366,7 @@ if ((NODEPS || (VERIFYSOURCE && !DEP_BIN))); then
   fi
 else
   if ((RMDEPS && !INSTALL)); then
-    original_pkglist=($(run_pacman -Qq)) # required by remove_dep
+    original_pkglist=($(get_installed)) # required by remove_dep
   fi
   deperr=0
 
@@ -1470,7 +1374,7 @@ else
   resolve_deps ${depends[@]} || deperr=1
 
   if ((RMDEPS && INSTALL)); then
-    original_pkglist=($(run_pacman -Qq)) # required by remove_dep
+    original_pkglist=($(get_installed)) # required by remove_dep
   fi
 
   if ((!deperr)); then
@@ -1483,7 +1387,7 @@ else
   fi
 
   if ((RMDEPS)); then
-    current_pkglist=($(run_pacman -Qq)) # required by remove_deps
+    current_pkglist=($(get_installed)) # required by remove_deps
   fi
 
   if ((deperr)); then
@@ -1563,5 +1467,3 @@ if ((NOARCHIVE)); then
 fi
 
 msg "$(gettext "Finished making: %s")" "$pkgbase $basever ($(date +%c))"
-
-install_package && exit $E_OK || exit $E_INSTALL_FAILED
