@@ -112,13 +112,14 @@ pub fn install(
 
         if (pkgs.len == 0) break :blk true;
         for (pkgs) |p| {
-            if (p.value.name == pkg.Name) {
-                if (p.value.version != pkg.Version)
+            if (std.mem.eql(u8, p.value.name, pkg.Name)) {
+                if (!std.mem.eql(u8, p.value.version, pkg.Version))
                     break :blk true
                 else
                     break :blk false;
             }
         }
+        break :blk true;
     };
     if (!diff_ver) return error.AlreadyInstalled;
 
@@ -128,7 +129,7 @@ pub fn install(
     var writer = try archive.Writer.init();
     defer writer.deinit();
 
-    const filename = try std.fmt.self.allocPrint(
+    const filename = try std.fmt.allocPrint(
         self.alloc,
         "{s}-{s}-x86_64.pkg.tar.zst",
         .{ pkg.Name, pkg.Version },

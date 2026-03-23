@@ -438,7 +438,7 @@ pub fn install(
     );
 }
 
-fn useMTREE(
+pub fn useMTREE(
     self: *Db,
     pkgid: i64,
     mtree_path: []const u8,
