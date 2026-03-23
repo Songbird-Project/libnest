@@ -31,8 +31,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
+    module.linkSystemLibrary("curl", .{});
+    module.linkSystemLibrary("archive", .{});
+    module.linkSystemLibrary("git2", .{});
     const curl = b.dependency("curl", .{
         .link_vendor = false,
         .target = target,
@@ -79,12 +83,6 @@ pub fn build(b: *std.Build) void {
             },
         });
 
-        lib.linkSystemLibrary("curl");
-        lib.linkSystemLibrary("archive");
-        lib.linkSystemLibrary("git2");
-        lib.linkLibC();
-        lib.root_module.addImport("curl", curl.module("curl"));
-        lib.root_module.addImport("sqlite", sqlite.module("sqlite"));
         b.installArtifact(lib);
     }
 
@@ -95,12 +93,6 @@ pub fn build(b: *std.Build) void {
             .linkage = .static,
         });
 
-        lib.linkSystemLibrary("curl");
-        lib.linkSystemLibrary("archive");
-        lib.linkSystemLibrary("git2");
-        lib.linkLibC();
-        lib.root_module.addImport("curl", curl.module("curl"));
-        lib.root_module.addImport("sqlite", sqlite.module("sqlite"));
         b.installArtifact(lib);
     }
 }
