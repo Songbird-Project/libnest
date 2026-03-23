@@ -126,8 +126,20 @@ test "AUR Build" {
     );
     defer b.deinit();
 
+    var db = try Db.init(
+        alloc,
+        "/home/dds/Desktop/Projects/Zig/nest/tests",
+        "x86_64",
+    );
+    defer db.deinit();
+
     for (res.results) |result| {
-        if (std.mem.eql(u8, result.Name, "trashy")) try b.build("tests", result);
+        if (std.mem.eql(u8, result.Name, "trashy")) try b.build(
+            &db,
+            "/home/dds/Desktop/Projects/Zig/nest/tests",
+            result,
+            true,
+        );
     }
 }
 
