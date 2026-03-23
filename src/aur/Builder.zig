@@ -137,7 +137,6 @@ pub fn install(
     defer self.alloc.free(filename);
     const dest = try std.fs.path.join(self.alloc, &.{
         cache,
-        pkg.Name,
         filename,
     });
     defer self.alloc.free(dest);
