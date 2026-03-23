@@ -34,11 +34,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    module.linkSystemLibrary("curl", .{});
     module.linkSystemLibrary("archive", .{});
     module.linkSystemLibrary("git2", .{});
     const curl = b.dependency("curl", .{
-        .link_vendor = false,
         .target = target,
         .optimize = optimize,
     });
