@@ -1,24 +1,22 @@
 const std = @import("std");
-const mdb = @import("../utils/mdb.zig");
 
-const Db = @import("../core/Database.zig");
 const Pkg = @import("../core/Package.zig");
+const Context = @import("../core/Context.zig");
 
 pub fn index(
-    alloc: std.mem.Allocator,
-    db: *Db,
+    ctx: *Context,
     repo: []const u8,
     path: []const u8,
     stmt: anytype,
 ) !i64 {
     const pkg = try parse(
-        alloc,
+        ctx.alloc,
         repo,
         path,
     );
-    defer pkg.deinit(alloc);
+    defer pkg.deinit(ctx.alloc);
 
-    return try db.insertPkg(
+    return try ctx.db.insertPkg(
         repo,
         pkg,
         stmt,

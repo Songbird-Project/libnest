@@ -3,6 +3,7 @@ const std = @import("std");
 const Downloader = @import("Downloader.zig");
 const Db = @import("../core/Database.zig");
 const Pkg = @import("../core/Package.zig");
+const Context = @import("../core/Context.zig");
 
 const MirrorList = @This();
 
@@ -50,19 +51,22 @@ pub fn deinit(self: *MirrorList) void {
 
 pub fn downloadPkg(
     self: MirrorList,
+    ctx: *Context,
     pkg: Pkg,
-    arch: []const u8,
     dest: []const u8,
-    download_cb: ?*const Downloader.callback,
 ) !void {
-    var dl: Downloader = try .init(self.alloc, 3, download_cb);
+    var dl = try Downloader.init(
+        self.alloc,
+        3,
+        ctx.download_cb,
+    );
     defer dl.deinit();
 
     for (self.mirrors) |mirror| {
         const url = try self.fmtMirrorURL(
             mirror,
             pkg.repo,
-            arch,
+            ctx.arch,
             pkg.filename,
         );
         defer self.alloc.free(url);
@@ -74,16 +78,23 @@ pub fn downloadPkg(
 
 pub fn downloadDb(
     self: MirrorList,
+    ctx: *Context,
     name: []const u8,
-    arch: []const u8,
     dest: []const u8,
-    download_cb: ?*const Downloader.callback,
 ) !void {
-    var dl: Downloader = try .init(self.alloc, 3, download_cb);
+    var dl = try Downloader.init(
+        self.alloc,
+        3,
+        ctx.download_cb,
+    );
     defer dl.deinit();
 
     for (self.mirrors) |mirror| {
-        const url = try self.fmtDbURL(mirror, name, arch);
+        const url = try self.fmtDbURL(
+            mirror,
+            name,
+            ctx.arch,
+        );
         defer self.alloc.free(url);
 
         dl.download(url, dest) catch continue;

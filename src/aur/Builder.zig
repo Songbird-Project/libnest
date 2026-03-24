@@ -2,12 +2,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sqlite = @import("sqlite");
 
+const resolver = @import("../core/resolver.zig");
+const installer = @import("../core/installer.zig");
 const archive = @import("../utils/archive.zig");
 const pkginfo = @import("../parse/pkginfo.zig");
 const git = @import("../utils/git.zig");
+const pkgbuild = @import("../parse/pkgbuild.zig");
 
+const Context = @import("../core/Context.zig");
+const MirrorList = @import("../net/MirrorList.zig");
 const Pkg = @import("./Package.zig");
-const Db = @import("../core/Database.zig");
 const CorePkg = @import("../core/Package.zig");
 
 const Builder = @This();
@@ -28,13 +32,12 @@ pub fn deinit(self: *Builder) void {
 
 pub fn build(
     self: *Builder,
-    db: *Db,
-    prefix: ?[]const u8,
+    ctx: *Context,
     pkg: Pkg.Basic,
     install_pkg: bool,
 ) !void {
     const cache = try std.fs.path.join(self.alloc, &.{
-        prefix orelse "/",
+        ctx.prefix,
         "var",
         "cache",
         pkg.Name,
@@ -59,6 +62,47 @@ pub fn build(
     git.free_repository(repo);
     _ = git.deinit();
 
+    const pkgbuild_path = try std.fs.path.join(
+        self.alloc,
+        &.{ cache, "PKGBUILD" },
+    );
+    defer self.alloc.free(pkgbuild_path);
+    const deps = try pkgbuild.getDeps(
+        self.alloc,
+        pkgbuild_path,
+        ctx.arch,
+    );
+    defer {
+        for (deps) |*dep| {
+            dep.deinit(self.alloc);
+        }
+        self.alloc.free(deps);
+    }
+
+    for (deps) |dep| {
+        const pkgs = try ctx.db.queryPkg(CorePkg, dep.name);
+        defer {
+            for (pkgs) |p| {
+                p.deinit(ctx.alloc);
+            }
+            ctx.alloc.free(pkgs);
+        }
+        if (pkgs.len <= 0) return error.DependencyNotFound;
+        const select = if (pkgs.len > 1) blk: {
+            if (ctx.select_cb) |cb|
+                break :blk try cb()
+            else
+                break :blk 0;
+        } else 0;
+        if (select <= -1) return error.AbortedInstall;
+        const p = pkgs[@intCast(select)];
+
+        try resolver.installWithDeps(
+            ctx,
+            p,
+        );
+    }
+
     var child = std.process.Child.init(&.{
         self.makepkg_path,
     }, self.alloc);
@@ -74,7 +118,11 @@ pub fn build(
         .Exited => |code| {
             switch (code) {
                 0 => {
-                    if (install_pkg) try self.install(db, pkg, cache, prefix);
+                    if (install_pkg) try self.install(
+                        ctx,
+                        pkg,
+                        cache,
+                    );
                 },
                 13 => return error.AlreadyBuilt,
                 else => return error.BuildFailed,
@@ -86,12 +134,11 @@ pub fn build(
 
 pub fn install(
     self: *Builder,
-    db: *Db,
+    ctx: *Context,
     pkg: Pkg.Basic,
     cache: []const u8,
-    prefix: ?[]const u8,
 ) !void {
-    var stmt = try db.db.prepare(
+    var stmt = try ctx.db.db.prepare(
         \\INSERT INTO installed (name, repo, metadata)
         \\VALUES (?, ?, jsonb(?))
         \\ON CONFLICT(name, repo) DO UPDATE SET
@@ -102,18 +149,18 @@ pub fn install(
     defer stmt.deinit();
 
     const diff_ver = blk: {
-        const pkgs = try db.queryPkg(CorePkg.Installed, pkg.Name);
+        const pkgs = try ctx.db.queryPkg(CorePkg.Installed, pkg.Name);
         defer {
             for (pkgs) |p| {
-                p.deinit();
+                p.deinit(ctx.alloc);
             }
             self.alloc.free(pkgs);
         }
 
         if (pkgs.len == 0) break :blk true;
         for (pkgs) |p| {
-            if (std.mem.eql(u8, p.value.name, pkg.Name)) {
-                if (!std.mem.eql(u8, p.value.version, pkg.Version))
+            if (std.mem.eql(u8, p.name, pkg.Name)) {
+                if (!std.mem.eql(u8, p.version, pkg.Version))
                     break :blk true
                 else
                     break :blk false;
@@ -131,8 +178,8 @@ pub fn install(
 
     const filename = try std.fmt.allocPrint(
         self.alloc,
-        "{s}-{s}-x86_64.pkg.tar.zst",
-        .{ pkg.Name, pkg.Version },
+        "{s}-{s}-{s}.pkg.tar.zst",
+        .{ pkg.Name, pkg.Version, ctx.arch },
     );
     defer self.alloc.free(filename);
     const dest = try std.fs.path.join(self.alloc, &.{
@@ -164,7 +211,7 @@ pub fn install(
             cache,
             rel,
         }) else try std.fs.path.join(self.alloc, &.{
-            prefix orelse "/",
+            ctx.prefix,
             rel,
         });
         defer self.alloc.free(install_path);
@@ -188,8 +235,7 @@ pub fn install(
     });
     defer self.alloc.free(pkginfo_path);
     const pkgid = try pkginfo.index(
-        self.alloc,
-        db,
+        ctx,
         "aur",
         pkginfo_path,
         &stmt,
@@ -201,9 +247,9 @@ pub fn install(
         ".MTREE",
     });
     defer self.alloc.free(mtree_path);
-    try db.useMTREE(
+    try installer.useMTREE(
+        ctx,
         pkgid,
         mtree_path,
-        prefix,
     );
 }
