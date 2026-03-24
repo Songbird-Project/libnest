@@ -33,7 +33,7 @@ fn installRecursive(
         const dep = Dep.parse(d);
         if (visited.contains(dep.name)) continue;
 
-        const pkgs = try ctx.db.queryPkg(Pkg, dep.name);
+        const pkgs: []Pkg = try ctx.db.queryPkg(.Sync, dep.name);
         defer {
             for (pkgs) |p| {
                 p.deinit(ctx.alloc);

@@ -20,7 +20,7 @@ pub fn install(
     );
     defer stmt.deinit();
 
-    const pkgs = try ctx.db.queryPkg(Pkg.Installed, pkg.name);
+    const pkgs: []Pkg.Installed = try ctx.db.queryPkg(.Installed, pkg.name);
     defer {
         for (pkgs) |p| {
             p.deinit(ctx.alloc);

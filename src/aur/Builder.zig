@@ -11,8 +11,10 @@ const pkgbuild = @import("../parse/pkgbuild.zig");
 
 const Context = @import("../core/Context.zig");
 const MirrorList = @import("../net/MirrorList.zig");
-const Pkg = @import("./Package.zig");
-const CorePkg = @import("../core/Package.zig");
+const AUR = struct {
+    const Pkg = @import("./Package.zig");
+};
+const Pkg = @import("../core/Package.zig");
 
 const Builder = @This();
 
@@ -33,7 +35,7 @@ pub fn deinit(self: *Builder) void {
 pub fn build(
     self: *Builder,
     ctx: *Context,
-    pkg: Pkg.Basic,
+    pkg: AUR.Pkg.Basic,
     install_pkg: bool,
 ) !void {
     const cache = try std.fs.path.join(self.alloc, &.{
@@ -80,7 +82,7 @@ pub fn build(
     }
 
     for (deps) |dep| {
-        const pkgs = try ctx.db.queryPkg(CorePkg, dep.name);
+        const pkgs: []Pkg = try ctx.db.queryPkg(.Sync, dep.name);
         defer {
             for (pkgs) |p| {
                 p.deinit(ctx.alloc);
@@ -89,10 +91,14 @@ pub fn build(
         }
         if (pkgs.len <= 0) return error.DependencyNotFound;
         const select = if (pkgs.len > 1) blk: {
-            if (ctx.select_cb) |cb|
-                break :blk try cb()
-            else
-                break :blk 0;
+            if (ctx.select_cb) |cb| {
+                var names: std.ArrayList([]const u8) = .empty;
+                defer names.deinit(ctx.alloc);
+                for (pkgs) |p| {
+                    try names.append(ctx.alloc, p.name);
+                }
+                break :blk try cb(names.items, names.items.len);
+            } else break :blk 0;
         } else 0;
         if (select <= -1) return error.AbortedInstall;
         const p = pkgs[@intCast(select)];
@@ -135,7 +141,7 @@ pub fn build(
 pub fn install(
     self: *Builder,
     ctx: *Context,
-    pkg: Pkg.Basic,
+    pkg: AUR.Pkg.Basic,
     cache: []const u8,
 ) !void {
     var stmt = try ctx.db.db.prepare(
@@ -149,7 +155,7 @@ pub fn install(
     defer stmt.deinit();
 
     const diff_ver = blk: {
-        const pkgs = try ctx.db.queryPkg(CorePkg.Installed, pkg.Name);
+        const pkgs: []Pkg.Installed = try ctx.db.queryPkg(.Installed, pkg.Name);
         defer {
             for (pkgs) |p| {
                 p.deinit(ctx.alloc);

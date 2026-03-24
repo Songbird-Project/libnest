@@ -13,6 +13,18 @@ const DbError = error{
     RelativePathInMTREE,
 };
 
+const PkgKind = enum {
+    Sync,
+    Installed,
+};
+
+fn PkgType(comptime pkg_type: PkgKind) type {
+    return switch (pkg_type) {
+        .Sync => Pkg,
+        .Installed => Pkg.Installed,
+    };
+}
+
 const Db = @This();
 
 alloc: std.mem.Allocator,
@@ -78,10 +90,10 @@ pub fn deinit(self: *Db) void {
 
 pub fn queryPkg(
     self: *Db,
-    comptime T: type,
+    comptime pkg_kind: PkgKind,
     name: []const u8,
-) ![]T {
-    if (T != Pkg and T != Pkg.Installed) return error.BadType;
+) ![]PkgType(pkg_kind) {
+    const T = PkgType(pkg_kind);
 
     const query_pkgs =
         \\SELECT json(metadata) FROM packages
@@ -147,14 +159,14 @@ pub fn insert(
     path: []const u8,
 ) !void {
     var stmt = try self.db.prepare(
-        \\INSERT INTO files (path, pkgid) VALUES (?, ?)
+        \\INSERT INTO files (pkgid, path) VALUES (?, ?)
         ,
     );
     defer stmt.deinit();
 
     try stmt.exec(.{}, .{
-        path,
         pkgid,
+        path,
     });
 }
 
