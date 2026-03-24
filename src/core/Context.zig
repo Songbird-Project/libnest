@@ -14,7 +14,7 @@ mirrors: MirrorList,
 
 /// Callbacks
 download_cb: ?*const fn (f64, f64) anyerror!void = null,
-select_cb: ?*const fn () anyerror!isize = null,
+select_cb: ?*const fn ([][]const u8, usize) anyerror!isize = null,
 
 pub fn init(
     alloc: std.mem.Allocator,
