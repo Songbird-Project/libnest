@@ -13,7 +13,7 @@ db: Db,
 mirrors: MirrorList,
 
 /// Callbacks
-download_cb: ?*const fn (f64, f64) anyerror!void = null,
+download_cb: ?*const fn ([]const u8, f64, f64) anyerror!void = null,
 select_cb: ?*const fn ([][]const u8, usize) anyerror!isize = null,
 
 pub fn init(
