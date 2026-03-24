@@ -17,7 +17,6 @@ fn write(
     return @intCast(real_size);
 }
 
-pub const callback = fn (f64, f64) anyerror!void;
 const DlResult = enum { success, retry };
 
 const Downloader = @This();
@@ -28,8 +27,10 @@ ca_bundle: *std.array_list.Managed(u8),
 retry_limit: u8,
 retries: u8 = 0,
 cb_error: ?anyerror = null,
-cb_filled: ?u8 = null,
-download_cb: ?*const Downloader.callback,
+downloaded: usize = 0,
+partial_size: usize = 0,
+current_dl: []const u8 = "None",
+download_cb: ?*const fn ([]const u8, f64, f64) anyerror!void,
 
 const DownloadError = error{
     TooManyRetries,
@@ -39,7 +40,7 @@ const DownloadError = error{
 pub fn init(
     alloc: std.mem.Allocator,
     retries: u8,
-    download_cb: ?*const Downloader.callback,
+    download_cb: ?*const fn ([]const u8, f64, f64) anyerror!void,
 ) !Downloader {
     const client = try alloc.create(curl.Easy);
     const ca_bundle = try alloc.create(std.array_list.Managed(u8));
@@ -68,6 +69,12 @@ pub fn download(
     dest: []const u8,
 ) !void {
     self.retries = 0;
+    if (std.mem.lastIndexOfScalar(u8, dest, '/')) |idx| {
+        const filename = dest[idx + 1 ..];
+        if (std.mem.indexOfScalar(u8, filename, '.')) |jdx| {
+            self.current_dl = filename[0..jdx];
+        }
+    }
 
     while (true) {
         const res = try self.attemptDownload(url, dest);
@@ -78,6 +85,7 @@ pub fn download(
                 if (self.retries >= self.retry_limit) return error.TooManyRetries;
                 self.retries += 1;
                 try std.fs.cwd().deleteFile(dest);
+                self.partial_size = 0;
                 continue;
             },
         }
@@ -137,6 +145,7 @@ pub fn attemptDownload(
     }
 
     if (partial_exists) {
+        self.partial_size = partial_size;
         try file.seekFromEnd(0);
     }
 
@@ -150,20 +159,22 @@ pub fn attemptDownload(
     try self.client.setMethod(.GET);
     try curl.checkCode(curl.libcurl.curl_easy_setopt(
         self.client.handle,
-        curl.libcurl.CURLOPT_XFERINFOFUNCTION,
-        Downloader.cb_wrapper,
-    ));
-    try curl.checkCode(curl.libcurl.curl_easy_setopt(
-        self.client.handle,
         curl.libcurl.CURLOPT_XFERINFODATA,
         self,
     ));
     try curl.checkCode(curl.libcurl.curl_easy_setopt(
         self.client.handle,
         curl.libcurl.CURLOPT_NOPROGRESS,
-        @as(c_long, 0),
+        @as(c_int, 0),
+    ));
+    try curl.checkCode(curl.libcurl.curl_easy_setopt(
+        self.client.handle,
+        curl.libcurl.CURLOPT_XFERINFOFUNCTION,
+        Downloader.cb_wrapper,
     ));
 
+    try self.client.setWritefunction(&curl.Easy.discardWriteCallback);
+    try self.client.setVerbose(false);
     try self.client.setWritedata(&file);
     try self.client.setWritefunction(Downloader.write);
 
@@ -186,24 +197,29 @@ pub fn attemptDownload(
 
 pub fn cb_wrapper(
     clientp: *anyopaque,
-    c_dltotal: c_long,
-    c_dlnow: c_long,
-    _: c_long,
-    _: c_long,
+    c_dltotal: curl.libcurl.curl_off_t,
+    c_dlnow: curl.libcurl.curl_off_t,
+    _: curl.libcurl.curl_off_t,
+    _: curl.libcurl.curl_off_t,
 ) callconv(.c) c_uint {
-    const dlnow: f64 = @floatFromInt(c_dlnow);
-    const dltotal: f64 = @floatFromInt(c_dltotal);
-
-    if (dltotal <= 0) return curl.libcurl.CURL_PROGRESSFUNC_CONTINUE;
-
     const self: *Downloader = @ptrCast(@alignCast(clientp));
 
+    const total_downloaded: f64 = @as(f64, @floatFromInt(c_dlnow)) + @as(f64, @floatFromInt(self.partial_size));
+    const total_size: f64 = if (c_dltotal > 0)
+        @as(f64, @floatFromInt(c_dltotal)) + @as(f64, @floatFromInt(self.partial_size))
+    else
+        0;
+
+    if (self.downloaded == @as(usize, @intFromFloat(total_downloaded)) or
+        self.partial_size == @as(usize, @intFromFloat(total_size))) return 0;
+    self.downloaded = @as(usize, @intFromFloat(total_downloaded));
+
     if (self.download_cb) |cb| {
-        cb(dlnow, dltotal) catch |err| {
+        cb(self.current_dl, total_downloaded, total_size) catch |err| {
             self.cb_error = err;
             return 1;
         };
     }
 
-    return curl.libcurl.CURL_PROGRESSFUNC_CONTINUE;
+    return 0;
 }
