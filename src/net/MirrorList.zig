@@ -71,7 +71,7 @@ pub fn downloadPkg(
         );
         defer self.alloc.free(url);
 
-        dl.download(url, dest) catch continue;
+        dl.download(url, dest, pkg.name) catch continue;
         break;
     }
 }
@@ -97,7 +97,7 @@ pub fn downloadDb(
         );
         defer self.alloc.free(url);
 
-        dl.download(url, dest) catch continue;
+        dl.download(url, dest, name) catch continue;
         break;
     }
 }
