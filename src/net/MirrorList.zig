@@ -74,6 +74,26 @@ pub fn downloadPkg(
         dl.download(url, dest, pkg.name) catch continue;
         break;
     }
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [8192]u8 = undefined;
+
+    const file = try std.fs.cwd().openFile(dest, .{});
+    defer file.close();
+
+    while (true) {
+        const bytes = try file.read(&buf);
+        if (bytes <= 0) break;
+        hasher.update(buf[0..bytes]);
+    }
+
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+
+    var pkg_hash: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pkg_hash, pkg.checksum);
+
+    if (!std.mem.eql(u8, &pkg_hash, &hash)) return error.CourrptDownload;
 }
 
 pub fn downloadDb(
