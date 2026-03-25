@@ -168,12 +168,17 @@ pub fn useMTREE(
     try reader.openFd(file.handle);
     while (try reader.nextEntry()) |entry| {
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-        if (std.mem.startsWith(u8, path, ".")) continue;
-        if (!std.fs.path.isAbsolute(path)) return error.RelativePathInMTREE;
+
+        if (std.mem.containsAtLeast(u8, path, 1, ".."))
+            return error.RelativePathInPkg;
+
+        var rel = path;
+        if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
+        if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
         const install_path = try std.fs.path.join(ctx.alloc, &.{
             ctx.prefix,
-            path,
+            rel,
         });
         defer ctx.alloc.free(install_path);
 
@@ -182,7 +187,7 @@ pub fn useMTREE(
         if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
         _ = archive.c.archive_write_finish_entry(writer);
 
-        try ctx.db.insert(pkgid, path);
+        try ctx.db.insert(pkgid, install_path);
     }
 }
 
