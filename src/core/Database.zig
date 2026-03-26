@@ -63,7 +63,7 @@ pub fn init(
         \\CREATE TABLE IF NOT EXISTS files(
         \\ pkgid INTEGER NOT NULL,
         \\ path TEXT,
-        \\ FOREIGN KEY(pkgid) REFERENCES packages(id) ON DELETE CASCADE
+        \\ FOREIGN KEY(pkgid) REFERENCES installed(id) ON DELETE CASCADE
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS installed(
