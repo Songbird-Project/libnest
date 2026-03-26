@@ -127,6 +127,7 @@ pub fn install(
     try useMTREE(
         ctx,
         pkgid,
+        cache,
         mtree_path,
     );
 }
@@ -134,6 +135,7 @@ pub fn install(
 pub fn useMTREE(
     ctx: *Context,
     pkgid: i64,
+    cache: []const u8,
     mtree_path: []const u8,
 ) !void {
     var reader = try archive.Reader.init();
@@ -176,11 +178,43 @@ pub fn useMTREE(
         if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
         if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-        const install_path = try std.fs.path.join(ctx.alloc, &.{
+        const install_path = if (path[0] == '.') try std.fs.path.join(ctx.alloc, &.{
+            cache,
+            rel,
+        }) else try std.fs.path.join(ctx.alloc, &.{
             ctx.prefix,
             rel,
         });
         defer ctx.alloc.free(install_path);
+
+        const path_type = archive.c.archive_entry_mode(entry) & 0o170000;
+
+        if (path_type == 0o10000) {
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            var buf: [8192]u8 = undefined;
+
+            const f = try std.fs.cwd().openFile(install_path, .{
+                .mode = .read_only,
+            });
+            defer f.close();
+
+            while (true) {
+                const bytes = try f.read(&buf);
+                if (bytes <= 0) break;
+                hasher.update(buf[0..bytes]);
+            }
+
+            var hash: [32]u8 = undefined;
+            hasher.final(&hash);
+
+            const entry_hash: []const u8 = std.mem.span(archive.c.archive_entry_digest(
+                entry,
+                archive.c.ARCHIVE_ENTRY_DIGEST_SHA256,
+            ));
+            var mtree_hash: [32]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&mtree_hash, entry_hash);
+            if (!std.mem.eql(u8, &mtree_hash, &hash)) return error.CourrptDownload;
+        }
 
         archive.c.archive_entry_set_pathname(entry, install_path.ptr);
         const ret = archive.c.archive_write_header(writer, entry);

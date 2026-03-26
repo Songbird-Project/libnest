@@ -256,6 +256,7 @@ pub fn install(
     try installer.useMTREE(
         ctx,
         pkgid,
+        cache,
         mtree_path,
     );
 }
