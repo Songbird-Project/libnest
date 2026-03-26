@@ -73,8 +73,6 @@ pub fn init(
         \\ metadata JSONB,
         \\ UNIQUE(name,repo)
         \\);
-        \\
-        \\CREATE INDEX IF NOT EXISTS idx_install_path ON files(path);
     , .{});
 
     return .{
