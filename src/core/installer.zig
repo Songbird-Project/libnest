@@ -6,6 +6,12 @@ const Db = @import("Database.zig");
 const Context = @import("Context.zig");
 const Pkg = @import("Package.zig");
 
+const InstallerError = error{
+    FailedToGetPackageId,
+    AlreadyInstalled,
+    RelativePathInPackage,
+};
+
 pub fn install(
     ctx: *Context,
     pkg: Pkg,
@@ -213,15 +219,15 @@ pub fn useMTREE(
             ));
             var mtree_hash: [32]u8 = undefined;
             _ = try std.fmt.hexToBytes(&mtree_hash, entry_hash);
-            if (!std.mem.eql(u8, &mtree_hash, &hash)) return error.CourrptDownload;
+            if (!std.mem.eql(u8, &mtree_hash, &hash)) return error.CorruptDownload;
+
+            archive.c.archive_entry_set_pathname(entry, install_path.ptr);
+            const ret = archive.c.archive_write_header(writer, entry);
+            if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
+            _ = archive.c.archive_write_finish_entry(writer);
+
+            try ctx.db.insert(pkgid, install_path);
         }
-
-        archive.c.archive_entry_set_pathname(entry, install_path.ptr);
-        const ret = archive.c.archive_write_header(writer, entry);
-        if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
-        _ = archive.c.archive_write_finish_entry(writer);
-
-        try ctx.db.insert(pkgid, install_path);
     }
 }
 
@@ -230,8 +236,26 @@ pub fn uninstall(
     pkgname: []const u8,
     repo: []const u8,
 ) !void {
+    const pkgid = try ctx.db.db.oneAlloc(
+        i64,
+        ctx.alloc,
+        "SELECT id FROM installed WHERE name = ? AND repo = ?",
+        .{},
+        .{ pkgname, repo },
+    );
+
+    if (pkgid == null) return error.FailedToGetPackageId;
+
+    var stmt = try ctx.db.db.prepare("SELECT path FROM files WHERE pkgid = ?");
+    defer stmt.deinit();
+
+    var iter = try stmt.iterator([]const u8, .{pkgid});
+    while (try iter.nextAlloc(ctx.alloc, .{})) |path| {
+        defer ctx.alloc.free(path);
+        try std.fs.cwd().deleteFile(path);
+    }
+
     try ctx.db.db.exec(
-        \\DELETE FROM installed WHERE name = ? AND repo = ?
-    , .{}, .{ pkgname, repo });
-    try ctx.db.db.exec("VACUUM;", .{}, .{});
+        \\DELETE FROM installed WHERE id = ?
+    , .{}, .{pkgid.?});
 }
