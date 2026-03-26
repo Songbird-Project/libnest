@@ -84,7 +84,7 @@ pub fn install(
         if (std.mem.containsAtLeast(u8, path, 1, ".."))
             return error.RelativePathInPkg;
 
-        const path_type = archive.c.archive_entry_mode(entry) & 0o170000;
+        const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
 
         var rel = path;
         if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
@@ -99,7 +99,7 @@ pub fn install(
         });
         defer ctx.alloc.free(install_path);
 
-        if (path_type == 0o100000) {
+        if (path_type == archive.c.S_IFREG) {
             try writer.writeHeader(entry, install_path);
             while (true) {
                 const bytes = try reader.readData(&buf);
@@ -184,7 +184,7 @@ pub fn useMTREE(
         if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
         if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-        const install_path = if (path[0] == '.') try std.fs.path.join(ctx.alloc, &.{
+        const install_path = if (rel[0] == '.') try std.fs.path.join(ctx.alloc, &.{
             cache,
             rel,
         }) else try std.fs.path.join(ctx.alloc, &.{
@@ -193,9 +193,9 @@ pub fn useMTREE(
         });
         defer ctx.alloc.free(install_path);
 
-        const path_type = archive.c.archive_entry_mode(entry) & 0o170000;
+        const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
 
-        if (path_type == 0o10000) {
+        if (path_type == archive.c.S_IFREG) {
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
             var buf: [8192]u8 = undefined;
 
@@ -206,20 +206,18 @@ pub fn useMTREE(
 
             while (true) {
                 const bytes = try f.read(&buf);
-                if (bytes <= 0) break;
+                if (bytes == 0) break;
                 hasher.update(buf[0..bytes]);
             }
 
             var hash: [32]u8 = undefined;
             hasher.final(&hash);
 
-            const entry_hash: []const u8 = std.mem.span(archive.c.archive_entry_digest(
+            const mtree_hash = archive.c.archive_entry_digest(
                 entry,
                 archive.c.ARCHIVE_ENTRY_DIGEST_SHA256,
-            ));
-            var mtree_hash: [32]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&mtree_hash, entry_hash);
-            if (!std.mem.eql(u8, &mtree_hash, &hash)) return error.CorruptDownload;
+            )[0..32];
+            if (!std.mem.eql(u8, mtree_hash, &hash)) return error.CorruptDownload;
 
             archive.c.archive_entry_set_pathname(entry, install_path.ptr);
             const ret = archive.c.archive_write_header(writer, entry);
@@ -252,7 +250,10 @@ pub fn uninstall(
     var iter = try stmt.iterator([]const u8, .{pkgid});
     while (try iter.nextAlloc(ctx.alloc, .{})) |path| {
         defer ctx.alloc.free(path);
-        try std.fs.cwd().deleteFile(path);
+        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
     }
 
     try ctx.db.db.exec(
