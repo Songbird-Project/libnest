@@ -39,9 +39,8 @@ pub fn build(
     install_pkg: bool,
 ) !void {
     const cache = try std.fs.path.join(self.alloc, &.{
-        ctx.prefix,
-        "var",
-        "cache",
+        ctx.paths.cache,
+        "aur",
         pkg.Name,
     });
     defer self.alloc.free(cache);
@@ -189,7 +188,8 @@ pub fn install(
     );
     defer self.alloc.free(filename);
     const dest = try std.fs.path.join(self.alloc, &.{
-        cache,
+        ctx.cache,
+        "aur",
         filename,
     });
     defer self.alloc.free(dest);
@@ -213,13 +213,27 @@ pub fn install(
         if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
         if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-        const install_path = if (path[0] == '.') try std.fs.path.join(self.alloc, &.{
-            cache,
-            rel,
-        }) else try std.fs.path.join(self.alloc, &.{
-            ctx.prefix,
-            rel,
-        });
+        const install_path =
+            if (rel[0] == '.')
+                try std.fs.path.join(ctx.alloc, &.{
+                    cache,
+                    rel,
+                })
+            else if (std.mem.startsWith(u8, rel, "etc"))
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.config,
+                    rel[3..],
+                })
+            else if (std.mem.startsWith(u8, rel, "usr/lib"))
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.lib,
+                    rel[7..],
+                })
+            else
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.root,
+                    rel,
+                });
         defer self.alloc.free(install_path);
 
         if (path_type == 0o100000) {

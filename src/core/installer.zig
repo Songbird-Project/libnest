@@ -48,9 +48,8 @@ pub fn install(
     defer writer.deinit();
 
     const cache = try std.fs.path.join(ctx.alloc, &.{
-        ctx.prefix,
-        "var",
-        "cache",
+        ctx.paths.cache,
+        "pkg",
         if (std.mem.indexOf(u8, pkg.filename, ".pkg.tar.")) |i|
             pkg.filename[0..i]
         else
@@ -94,7 +93,7 @@ pub fn install(
             cache,
             rel,
         }) else try std.fs.path.join(ctx.alloc, &.{
-            ctx.prefix,
+            ctx.paths.root,
             rel,
         });
         defer ctx.alloc.free(install_path);
@@ -184,13 +183,27 @@ pub fn useMTREE(
         if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
         if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-        const install_path = if (rel[0] == '.') try std.fs.path.join(ctx.alloc, &.{
-            cache,
-            rel,
-        }) else try std.fs.path.join(ctx.alloc, &.{
-            ctx.prefix,
-            rel,
-        });
+        const install_path =
+            if (rel[0] == '.')
+                try std.fs.path.join(ctx.alloc, &.{
+                    cache,
+                    rel,
+                })
+            else if (std.mem.startsWith(u8, rel, "etc"))
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.config,
+                    rel[3..],
+                })
+            else if (std.mem.startsWith(u8, rel, "usr/lib"))
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.lib,
+                    rel[7..],
+                })
+            else
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.root,
+                    rel,
+                });
         defer ctx.alloc.free(install_path);
 
         const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;

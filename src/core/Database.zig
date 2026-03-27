@@ -32,9 +32,12 @@ db: *sqlite.Db,
 
 pub fn init(
     alloc: std.mem.Allocator,
-    prefix: []const u8,
+    db_path: []const u8,
 ) !Db {
-    const dbpath = try std.fs.path.joinZ(alloc, &.{ prefix, "pkgs.db" });
+    const dbpath = try std.fs.path.joinZ(alloc, &.{
+        db_path,
+        "pkgs.db",
+    });
     defer alloc.free(dbpath);
     const db = try alloc.create(sqlite.Db);
     db.* = try sqlite.Db.init(.{
@@ -219,7 +222,7 @@ pub fn sync(
     );
     defer self.alloc.free(repodb);
     const dest = try std.fs.path.join(self.alloc, &.{
-        ctx.prefix,
+        ctx.paths.cache,
         repodb,
     });
     defer self.alloc.free(dest);
