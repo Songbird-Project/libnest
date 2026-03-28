@@ -14,7 +14,7 @@ const InstallerError = error{
 
 pub fn install(
     ctx: *Context,
-    pkg: Pkg,
+    pkgs: []Pkg,
 ) !void {
     var stmt = try ctx.db.db.prepare(
         \\INSERT INTO installed (name, repo, metadata)
@@ -26,115 +26,137 @@ pub fn install(
     );
     defer stmt.deinit();
 
-    const pkgs: []Pkg.Installed = try ctx.db.queryPkg(.Installed, pkg.name);
-    defer {
-        for (pkgs) |p| {
-            p.deinit(ctx.alloc);
-        }
-        ctx.alloc.free(pkgs);
-    }
-    const diff_ver = blk: {
-        for (pkgs) |p| {
-            if (std.mem.eql(u8, p.version, pkg.version)) continue else break :blk true;
-        }
-        break :blk false;
+    const PkgInfo = struct {
+        pkg: Pkg,
+        dest: []const u8,
+        cache: []const u8,
     };
-    if (pkgs.len > 0 and !diff_ver) return error.AlreadyInstalled;
 
-    var reader = try archive.Reader.init();
-    defer reader.deinit();
-
-    var writer = try archive.Writer.init();
-    defer writer.deinit();
-
-    const cache = try std.fs.path.join(ctx.alloc, &.{
-        ctx.paths.cache,
-        "pkg",
-        if (std.mem.indexOf(u8, pkg.filename, ".pkg.tar.")) |i|
-            pkg.filename[0..i]
-        else
-            pkg.checksum,
-    });
-    defer ctx.alloc.free(cache);
-    try std.fs.cwd().makePath(cache);
-
-    const dest = try std.fs.path.join(ctx.alloc, &.{
-        cache,
-        pkg.filename,
-    });
-    defer ctx.alloc.free(dest);
-
-    try ctx.mirrors.downloadPkg(
-        ctx,
-        pkg,
-        dest,
-    );
-
-    const file = try std.fs.cwd().openFile(
-        dest,
-        .{ .mode = .read_only },
-    );
-    defer file.close();
-
-    try reader.openFd(file.handle);
-    var buf: [8192]u8 = undefined;
-    while (try reader.nextEntry()) |entry| {
-        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-        if (std.mem.containsAtLeast(u8, path, 1, ".."))
-            return error.RelativePathInPkg;
-
-        const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
-
-        var rel = path;
-        if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
-        if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
-
-        const install_path = if (path[0] == '.') try std.fs.path.join(ctx.alloc, &.{
-            cache,
-            rel,
-        }) else try std.fs.path.join(ctx.alloc, &.{
-            ctx.paths.root,
-            rel,
-        });
-        defer ctx.alloc.free(install_path);
-
-        if (path_type == archive.c.S_IFREG) {
-            try writer.writeHeader(entry, install_path);
-            while (true) {
-                const bytes = try reader.readData(&buf);
-                if (bytes <= 0) break;
-
-                try writer.writeData(buf[0..bytes], bytes);
-            }
+    var infos: std.ArrayList(PkgInfo) = .empty;
+    defer {
+        for (infos.items) |item| {
+            ctx.alloc.free(item.dest);
+            ctx.alloc.free(item.cache);
         }
-
-        try writer.finishEntry();
+        infos.deinit(ctx.alloc);
     }
 
-    const pkginfo_path = try std.fs.path.join(ctx.alloc, &.{
-        cache,
-        ".PKGINFO",
-    });
-    defer ctx.alloc.free(pkginfo_path);
-    const pkgid = try pkginfo.index(
-        ctx,
-        pkg.repo,
-        pkginfo_path,
-        &stmt,
-    );
-    stmt.reset();
+    for (pkgs) |pkg| {
+        const queried: []Pkg.Installed = try ctx.db.queryPkg(.Installed, pkg.name);
+        defer {
+            for (queried) |p| {
+                p.deinit(ctx.alloc);
+            }
+            ctx.alloc.free(queried);
+        }
+        const diff_ver = blk: {
+            for (pkgs) |p| {
+                if (std.mem.eql(u8, p.version, pkg.version)) continue else break :blk true;
+            }
+            break :blk false;
+        };
+        if (queried.len > 0 and !diff_ver) return error.AlreadyInstalled;
 
-    const mtree_path = try std.fs.path.join(ctx.alloc, &.{
-        cache,
-        ".MTREE",
-    });
-    defer ctx.alloc.free(mtree_path);
-    try useMTREE(
-        ctx,
-        pkgid,
-        cache,
-        mtree_path,
-    );
+        const cache = try std.fs.path.join(ctx.alloc, &.{
+            ctx.paths.cache,
+            "pkg",
+            if (std.mem.indexOf(u8, pkg.filename, ".pkg.tar.")) |i|
+                pkg.filename[0..i]
+            else
+                pkg.checksum,
+        });
+        try std.fs.cwd().makePath(cache);
+
+        const dest = try std.fs.path.join(ctx.alloc, &.{
+            cache,
+            pkg.filename,
+        });
+
+        try ctx.mirrors.downloadPkg(
+            ctx,
+            pkg,
+            dest,
+        );
+        try infos.append(ctx.alloc, .{
+            .pkg = pkg,
+            .dest = dest,
+            .cache = cache,
+        });
+    }
+
+    for (infos.items) |info| {
+        var reader = try archive.Reader.init();
+        defer reader.deinit();
+
+        var writer = try archive.Writer.init();
+        defer writer.deinit();
+
+        const file = try std.fs.cwd().openFile(
+            info.dest,
+            .{ .mode = .read_only },
+        );
+        defer file.close();
+
+        try reader.openFd(file.handle);
+        var buf: [8192]u8 = undefined;
+        while (try reader.nextEntry()) |entry| {
+            const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+            if (std.mem.containsAtLeast(u8, path, 1, ".."))
+                return error.RelativePathInPkg;
+
+            const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
+
+            var rel = path;
+            if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
+            if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
+
+            const install_path = if (path[0] == '.') try std.fs.path.join(ctx.alloc, &.{
+                info.cache,
+                rel,
+            }) else try std.fs.path.join(ctx.alloc, &.{
+                ctx.paths.root,
+                rel,
+            });
+            defer ctx.alloc.free(install_path);
+
+            if (path_type == archive.c.S_IFREG) {
+                try writer.writeHeader(entry, install_path);
+                while (true) {
+                    const bytes = try reader.readData(&buf);
+                    if (bytes <= 0) break;
+
+                    try writer.writeData(buf[0..bytes], bytes);
+                }
+            }
+
+            try writer.finishEntry();
+        }
+
+        const pkginfo_path = try std.fs.path.join(ctx.alloc, &.{
+            info.cache,
+            ".PKGINFO",
+        });
+        defer ctx.alloc.free(pkginfo_path);
+        const pkgid = try pkginfo.index(
+            ctx,
+            info.pkg.repo,
+            pkginfo_path,
+            &stmt,
+        );
+        stmt.reset();
+
+        const mtree_path = try std.fs.path.join(ctx.alloc, &.{
+            info.cache,
+            ".MTREE",
+        });
+        defer ctx.alloc.free(mtree_path);
+        try useMTREE(
+            ctx,
+            pkgid,
+            info.cache,
+            mtree_path,
+        );
+    }
 }
 
 pub fn useMTREE(
