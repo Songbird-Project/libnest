@@ -10,6 +10,11 @@ pub fn installWithDeps(
     ctx: *Context,
     pkg: Pkg,
 ) !void {
+    try ctx.log(
+        .Info,
+        .Resolve,
+        "depedencies",
+    );
     const pkgs = try resolvePkg(ctx, pkg);
     defer {
         for (pkgs) |p| {

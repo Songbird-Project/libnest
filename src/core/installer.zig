@@ -41,6 +41,11 @@ pub fn install(
         infos.deinit(ctx.alloc);
     }
 
+    try ctx.log(
+        .Info,
+        .Download,
+        "package files",
+    );
     for (pkgs) |pkg| {
         const queried: []Pkg.Installed = try ctx.db.queryPkg(.Installed, pkg.name);
         defer {
@@ -55,7 +60,9 @@ pub fn install(
             }
             break :blk false;
         };
-        if (queried.len > 0 and !diff_ver) return error.AlreadyInstalled;
+        if (queried.len > 0 and !diff_ver) {
+            return error.AlreadyInstalled;
+        }
 
         const cache = try std.fs.path.join(ctx.alloc, &.{
             ctx.paths.cache,
@@ -85,6 +92,12 @@ pub fn install(
     }
 
     for (infos.items) |info| {
+        try ctx.log(
+            .Info,
+            .Install,
+            info.pkg.name,
+        );
+
         var reader = try archive.Reader.init();
         defer reader.deinit();
 

@@ -3,6 +3,33 @@ const std = @import("std");
 const Db = @import("Database.zig");
 const MirrorList = @import("../net/MirrorList.zig");
 
+pub const LogLevel = enum(u8) {
+    Debug,
+    Info,
+    Error,
+    Fatal,
+};
+
+pub const Action = enum(u8) {
+    Install,
+    Uninstall,
+    Resolve,
+    Build,
+    Sync,
+    Download,
+
+    pub fn format(self: Action, writer: *std.io.Writer) !void {
+        try switch (self) {
+            .Install => writer.writeAll("Installing"),
+            .Uninstall => writer.writeAll("Uninstalling"),
+            .Resolve => writer.writeAll("Resolving"),
+            .Build => writer.writeAll("Building"),
+            .Sync => writer.writeAll("Syncing"),
+            .Download => writer.writeAll("Downloading"),
+        };
+    }
+};
+
 pub const PathConfig = struct {
     root: []const u8 = "/",
     lib: []const u8 = "usr/lib",
@@ -31,6 +58,7 @@ paths: PathConfig,
 /// Callbacks
 download_cb: ?*const fn ([]const u8, f64, f64, bool) anyerror!void = null,
 select_cb: ?*const fn ([][]const u8, usize) anyerror!isize = null,
+log_cb: ?*const fn (LogLevel, Action, []const u8) anyerror!void = null,
 
 pub fn init(
     alloc: std.mem.Allocator,
@@ -79,4 +107,15 @@ pub fn deinit(self: *Context) void {
     self.db.deinit();
     self.alloc.free(self.arch);
     self.paths.deinit(self.alloc);
+}
+
+pub fn log(
+    self: *Context,
+    level: LogLevel,
+    action: Action,
+    detail: []const u8,
+) !void {
+    if (self.log_cb) |cb| {
+        try cb(level, action, detail);
+    }
 }
