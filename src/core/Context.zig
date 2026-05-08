@@ -2,6 +2,21 @@ const std = @import("std");
 
 const Db = @import("Database.zig");
 const MirrorList = @import("../net/MirrorList.zig");
+const Pkg = @import("Package.zig");
+
+const txn_hooks = @import("hooks.zig");
+
+pub const Transaction = struct {
+    installs: std.ArrayList(Pkg) = .empty,
+    upgrades: std.ArrayList(Pkg) = .empty,
+    removes: std.ArrayList(Pkg) = .empty,
+
+    pub fn deinit(alloc: std.mem.Allocator, self: *Transaction) void {
+        self.installs.deinit(alloc);
+        self.upgrades.deinit(alloc);
+        self.removes.deinit(alloc);
+    }
+};
 
 pub const LogLevel = enum(u8) {
     Debug,
@@ -32,15 +47,12 @@ pub const Action = enum(u8) {
 
 pub const PathConfig = struct {
     root: []const u8 = "/",
-    lib: []const u8 = "usr/lib",
-    config: []const u8 = "etc",
     cache: []const u8 = "var/cache/libnest",
     db: []const u8 = "etc/libnest",
+    hook: []const u8 = "etc/libnest/hooks",
 
     pub fn deinit(self: *PathConfig, alloc: std.mem.Allocator) void {
         alloc.free(self.root);
-        alloc.free(self.lib);
-        alloc.free(self.config);
         alloc.free(self.cache);
         alloc.free(self.db);
     }
@@ -54,6 +66,8 @@ arch: []const u8,
 db: Db,
 mirrors: MirrorList,
 paths: PathConfig,
+hooks: []txn_hooks.Hook = &.{},
+// txn: Transaction,
 
 /// Callbacks
 download_cb: ?*const fn ([]const u8, f64, f64, bool) anyerror!void = null,
@@ -68,14 +82,14 @@ pub fn init(
 ) !Context {
     var p = PathConfig{
         .root = try alloc.dupe(u8, paths.root),
-        .lib = try std.fs.path.join(alloc, &.{
-            paths.root,
-            paths.lib,
-        }),
-        .config = try std.fs.path.join(alloc, &.{
-            paths.root,
-            paths.config,
-        }),
+        // .lib = try std.fs.path.join(alloc, &.{
+        //     paths.root,
+        //     paths.lib,
+        // }),
+        // .config = try std.fs.path.join(alloc, &.{
+        //     paths.root,
+        //     paths.config,
+        // }),
         .cache = try std.fs.path.join(alloc, &.{
             paths.root,
             paths.cache,
@@ -83,6 +97,10 @@ pub fn init(
         .db = try std.fs.path.join(alloc, &.{
             paths.root,
             paths.db,
+        }),
+        .hook = try std.fs.path.join(alloc, &.{
+            paths.root,
+            paths.hook,
         }),
     };
     errdefer p.deinit(alloc);
