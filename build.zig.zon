@@ -12,6 +12,10 @@
             .url = "git+https://github.com/vrischmann/zig-sqlite#0b75ba276d34de3141ec1697e3ef7c836d7b38e7",
             .hash = "sqlite-3.48.0-F2R_a8eODgD9X8XjvWlZ1K7C-tDuHae4FuShM2N-yIT2",
         },
+        .ini = .{
+            .url = "git+https://github.com/ziglibs/ini#918f16d0dcf893d0c1cdffe204faa08bb3584e04",
+            .hash = "ini-0.1.0-YCQ9Ys0pAABixEvvQvhVXAdqRE3wrZk_wiL9TPNHhB8d",
+        },
     },
     .paths = .{
         "build.zig",

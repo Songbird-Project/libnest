@@ -46,6 +46,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     module.addImport("sqlite", sqlite.module("sqlite"));
+    const ini = b.dependency("ini", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    module.addImport("ini", ini.module("ini"));
 
     const tests = b.addTest(.{
         .root_module = b.addModule("tests", .{
