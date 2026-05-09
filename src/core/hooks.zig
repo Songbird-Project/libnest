@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ini = @import("ini");
 
 const Context = @import("Context.zig");
@@ -130,6 +131,47 @@ pub const Hook = struct {
         ctx.alloc.free(self.name);
         ctx.alloc.free(self.exec);
     }
+
+    pub fn tryRun(self: *Hook, ctx: *Context) !void {
+        var run: bool = false;
+
+        for (self.triggers) |trigger| {
+            for (trigger.ops) |op| {
+                for (trigger.targets) |target| {
+                    switch (trigger.type) {
+                        .Pkg => {
+                            if (op == .Install) for (ctx.txn.installs.items) |info| {
+                                if (std.mem.eql(
+                                    u8,
+                                    info.pkg.name,
+                                    target,
+                                )) run = true;
+                            };
+                        },
+                        .Path => {
+                            if (op == .Install) for (ctx.txn.installs.items) |info| {
+                                if (std.mem.indexOf(
+                                    u8,
+                                    info.files,
+                                    target,
+                                )) run = true;
+                            };
+                        },
+                    }
+                }
+            }
+        }
+
+        var child = std.process.Child.init(&.{
+            self.exec,
+        }, self.alloc);
+
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = if (builtin.is_test) .Ignore else .Inherit;
+        child.stderr_behavior = if (builtin.is_test) .Ignore else .Inherit;
+
+        _ = try child.spawnAndWait();
+    }
 };
 
 pub fn initAll(ctx: *Context) ![]Hook {
@@ -149,6 +191,10 @@ pub fn initAll(ctx: *Context) ![]Hook {
     }
 }
 
-pub fn deinitAll(ctx: *Context, hooks: []Hook) void {
-    for (hooks) |hook| hook.deinit(ctx);
+pub fn deinitAll(ctx: *Context) void {
+    for (ctx.hooks) |hook| hook.deinit(ctx);
+}
+
+pub fn tryRunAll(ctx: *Context, when: When) !void {
+    for (ctx.hooks) |hook| if (hook.when == when) hook.run(ctx);
 }
