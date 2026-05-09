@@ -6,47 +6,51 @@ const Db = @import("Database.zig");
 const Context = @import("Context.zig");
 const Pkg = @import("Package.zig");
 
+pub const PkgInstallInfo = struct {
+    pkg: Pkg,
+    location: []const u8,
+    cache: []const u8,
+    files: [][]const u8,
+
+    pub fn deinit(self: *PkgInstallInfo, alloc: std.mem.Allocator) void {
+        for (self.files) |file| {
+            alloc.free(file);
+        }
+
+        alloc.free(self.files);
+        alloc.free(self.location);
+        alloc.free(self.cache);
+
+        self.pkg.deinit(alloc);
+    }
+};
+
 const InstallerError = error{
     FailedToGetPackageId,
     AlreadyInstalled,
     RelativePathInPackage,
 };
 
-pub fn install(
+pub fn prepareInstall(
     ctx: *Context,
     pkgs: []Pkg,
 ) !void {
-    var stmt = try ctx.db.db.prepare(
-        \\INSERT INTO installed (name, repo, metadata)
-        \\VALUES (?, ?, jsonb(?))
-        \\ON CONFLICT(name, repo) DO UPDATE SET
-        \\metadata = excluded.metadata
-        \\WHERE metadata != excluded.metadata
-        ,
-    );
-    defer stmt.deinit();
-
-    const PkgInfo = struct {
-        pkg: Pkg,
-        dest: []const u8,
-        cache: []const u8,
-    };
-
-    var infos: std.ArrayList(PkgInfo) = .empty;
-    defer {
-        for (infos.items) |item| {
-            ctx.alloc.free(item.dest);
-            ctx.alloc.free(item.cache);
-        }
-        infos.deinit(ctx.alloc);
-    }
-
     try ctx.log(
         .Info,
         .Download,
         "package files",
     );
     for (pkgs) |pkg| {
+        const dup = dup: {
+            for (ctx.txn.installs.items) |item| {
+                if (std.mem.eql(u8, item.pkg.name, pkg.name) and
+                    std.mem.eql(u8, item.pkg.version, pkg.version))
+                    break :dup true;
+            }
+            break :dup false;
+        };
+        if (dup) continue;
+
         const queried: []Pkg.Installed = try ctx.db.queryPkg(.Installed, pkg.name);
         defer {
             for (queried) |p| {
@@ -64,6 +68,9 @@ pub fn install(
             return error.AlreadyInstalled;
         }
 
+        var file_list: std.ArrayList([]const u8) = .empty;
+        defer file_list.deinit(ctx.alloc);
+
         const cache = try std.fs.path.join(ctx.alloc, &.{
             ctx.paths.cache,
             "pkg",
@@ -72,26 +79,81 @@ pub fn install(
             else
                 pkg.checksum,
         });
+        defer ctx.alloc.free(cache);
         try std.fs.cwd().makePath(cache);
 
         const dest = try std.fs.path.join(ctx.alloc, &.{
             cache,
             pkg.filename,
         });
+        defer ctx.alloc.free(dest);
 
         try ctx.mirrors.downloadPkg(
             ctx,
             pkg,
             dest,
         );
-        try infos.append(ctx.alloc, .{
-            .pkg = pkg,
-            .dest = dest,
-            .cache = cache,
-        });
-    }
 
-    for (infos.items) |info| {
+        const file = try std.fs.cwd().openFile(
+            dest,
+            .{ .mode = .read_only },
+        );
+        defer file.close();
+
+        var reader = try archive.Reader.init();
+        defer reader.deinit();
+        try reader.openFd(file.handle);
+        while (try reader.nextEntry()) |entry| {
+            const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+
+            const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
+
+            var rel = path;
+            if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
+            if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
+
+            const basename = std.fs.path.basename(rel);
+            if (basename.len > 0 and basename[0] == '.') continue;
+
+            const install_path = try std.fs.path.join(ctx.alloc, &.{
+                ctx.paths.root,
+                rel,
+            });
+            defer ctx.alloc.free(install_path);
+
+            if (path_type == archive.c.S_IFREG or path_type == archive.c.S_IFLNK) {
+                try file_list.append(
+                    ctx.alloc,
+                    try ctx.alloc.dupe(u8, install_path),
+                );
+            }
+        }
+
+        const info = PkgInstallInfo{
+            .pkg = try pkg.clone(ctx.alloc),
+            .location = try ctx.alloc.dupe(u8, dest),
+            .cache = try ctx.alloc.dupe(u8, cache),
+            .files = try file_list.toOwnedSlice(ctx.alloc),
+        };
+
+        try ctx.txn.installs.append(ctx.alloc, info);
+    }
+}
+
+pub fn install(
+    ctx: *Context,
+) !void {
+    var stmt = try ctx.db.db.prepare(
+        \\INSERT INTO installed (name, repo, metadata)
+        \\VALUES (?, ?, jsonb(?))
+        \\ON CONFLICT(name, repo) DO UPDATE SET
+        \\metadata = excluded.metadata
+        \\WHERE metadata != excluded.metadata
+        ,
+    );
+    defer stmt.deinit();
+
+    for (ctx.txn.installs.items) |info| {
         try ctx.log(
             .Info,
             .Install,
@@ -105,7 +167,7 @@ pub fn install(
         defer writer.deinit();
 
         const file = try std.fs.cwd().openFile(
-            info.dest,
+            info.location,
             .{ .mode = .read_only },
         );
         defer file.close();
@@ -114,26 +176,38 @@ pub fn install(
         var buf: [8192]u8 = undefined;
         while (try reader.nextEntry()) |entry| {
             const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-            if (std.mem.containsAtLeast(u8, path, 1, ".."))
-                return error.RelativePathInPkg;
-
             const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
 
             var rel = path;
             if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
             if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-            const install_path = if (path[0] == '.') try std.fs.path.join(ctx.alloc, &.{
-                info.cache,
-                rel,
-            }) else try std.fs.path.join(ctx.alloc, &.{
-                ctx.paths.root,
-                rel,
-            });
+            const basename = std.fs.path.basename(rel);
+            const install_path = if (basename.len > 0 and basename[0] == '.')
+                try std.fs.path.join(ctx.alloc, &.{
+                    info.cache,
+                    rel,
+                })
+            else if (std.mem.startsWith(u8, path, "/usr/share/libalpm/hooks/"))
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.hook,
+                    rel[25..],
+                })
+            else
+                try std.fs.path.join(ctx.alloc, &.{
+                    ctx.paths.root,
+                    rel,
+                });
             defer ctx.alloc.free(install_path);
 
+            try writer.writeHeader(
+                ctx,
+                info,
+                entry,
+                install_path,
+            );
+
             if (path_type == archive.c.S_IFREG) {
-                try writer.writeHeader(entry, install_path);
                 while (true) {
                     const bytes = try reader.readData(&buf);
                     if (bytes <= 0) break;
@@ -165,38 +239,23 @@ pub fn install(
         defer ctx.alloc.free(mtree_path);
         try useMTREE(
             ctx,
-            pkgid,
             info.cache,
             mtree_path,
         );
+
+        for (info.files) |installed| {
+            try ctx.db.insert(pkgid, installed);
+        }
     }
 }
 
 pub fn useMTREE(
     ctx: *Context,
-    pkgid: i64,
     cache: []const u8,
     mtree_path: []const u8,
 ) !void {
     var reader = try archive.Reader.init();
     defer reader.deinit();
-
-    const writer = archive.c.archive_write_disk_new() orelse
-        return error.UnableToCreateWriter;
-    defer _ = archive.c.archive_write_free(writer);
-
-    _ = archive.c.archive_write_disk_set_standard_lookup(writer);
-    _ = archive.c.archive_write_disk_set_options(
-        writer,
-        archive.c.ARCHIVE_EXTRACT_PERM |
-            archive.c.ARCHIVE_EXTRACT_TIME |
-            archive.c.ARCHIVE_EXTRACT_OWNER |
-            archive.c.ARCHIVE_EXTRACT_ACL |
-            archive.c.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
-            archive.c.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
-            archive.c.ARCHIVE_EXTRACT_UNLINK |
-            archive.c.ARCHIVE_EXTRACT_FFLAGS,
-    );
 
     const file = std.fs.cwd().openFile(
         mtree_path,
@@ -207,47 +266,77 @@ pub fn useMTREE(
     };
     defer file.close();
 
+    var visited = std.StringHashMap(void).init(ctx.alloc);
+    defer {
+        var it = visited.keyIterator();
+        while (it.next()) |k| ctx.alloc.free(k.*);
+        visited.deinit();
+    }
+
     try reader.openFd(file.handle);
     while (try reader.nextEntry()) |entry| {
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-
-        if (std.mem.containsAtLeast(u8, path, 1, ".."))
-            return error.RelativePathInPkg;
+        const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
 
         var rel = path;
         if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
         if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-        const install_path =
-            if (rel[0] == '.')
-                try std.fs.path.join(ctx.alloc, &.{
-                    cache,
-                    rel,
-                })
-            else if (std.mem.startsWith(u8, rel, "etc"))
-                try std.fs.path.join(ctx.alloc, &.{
-                    ctx.paths.config,
-                    rel[3..],
-                })
-            else if (std.mem.startsWith(u8, rel, "usr/lib"))
-                try std.fs.path.join(ctx.alloc, &.{
-                    ctx.paths.lib,
-                    rel[7..],
-                })
-            else
-                try std.fs.path.join(ctx.alloc, &.{
-                    ctx.paths.root,
-                    rel,
-                });
+        const basename = std.fs.path.basename(rel);
+        const install_path = if (basename.len > 0 and basename[0] == '.')
+            try std.fs.path.join(ctx.alloc, &.{
+                cache,
+                rel,
+            })
+        else if (std.mem.startsWith(u8, path, "/usr/share/libalpm/hooks/"))
+            try std.fs.path.join(ctx.alloc, &.{
+                ctx.paths.hook,
+                rel[25..],
+            })
+        else
+            try std.fs.path.join(ctx.alloc, &.{
+                ctx.paths.root,
+                rel,
+            });
         defer ctx.alloc.free(install_path);
 
-        const path_type = archive.c.archive_entry_mode(entry) & archive.c.S_IFMT;
-
         if (path_type == archive.c.S_IFREG) {
+            const hash_path = hash: {
+                if (archive.c.archive_entry_hardlink(entry)) |lnk| {
+                    const target: []const u8 = std.mem.span(lnk);
+
+                    var target_rel = target;
+                    if (std.mem.startsWith(u8, target, "./")) target_rel = target_rel[2..];
+                    if (std.mem.startsWith(u8, target, "/")) target_rel = target_rel[1..];
+
+                    const rel_basename = std.fs.path.basename(target_rel);
+                    const target_path = if (rel_basename.len > 0 and rel_basename[0] == '.')
+                        try std.fs.path.join(ctx.alloc, &.{
+                            cache,
+                            target_rel,
+                        })
+                    else if (std.mem.startsWith(u8, target, "/usr/share/libalpm/hooks/"))
+                        try std.fs.path.join(ctx.alloc, &.{
+                            ctx.paths.hook,
+                            target_rel[25..],
+                        })
+                    else
+                        try std.fs.path.join(ctx.alloc, &.{
+                            ctx.paths.root,
+                            target_rel,
+                        });
+
+                    break :hash target_path;
+                } else break :hash install_path;
+            };
+            defer if (!std.mem.eql(u8, hash_path, install_path)) ctx.alloc.free(hash_path);
+            if (visited.contains(path)) continue;
+            try visited.put(try ctx.alloc.dupe(u8, path), {});
+
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
             var buf: [8192]u8 = undefined;
 
-            const f = try std.fs.cwd().openFile(install_path, .{
+            const f = try std.fs.cwd().openFile(hash_path, .{
                 .mode = .read_only,
             });
             defer f.close();
@@ -266,13 +355,14 @@ pub fn useMTREE(
                 archive.c.ARCHIVE_ENTRY_DIGEST_SHA256,
             )[0..32];
             if (!std.mem.eql(u8, mtree_hash, &hash)) return error.CorruptDownload;
+        } else if (path_type == archive.c.S_IFLNK) {
+            const expect: []const u8 = std.mem.span(archive.c.archive_entry_symlink(entry));
 
-            archive.c.archive_entry_set_pathname(entry, install_path.ptr);
-            const ret = archive.c.archive_write_header(writer, entry);
-            if (ret != archive.c.ARCHIVE_OK) return error.WriteHeaderFailed;
-            _ = archive.c.archive_write_finish_entry(writer);
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
 
-            try ctx.db.insert(pkgid, install_path);
+            const on_disk = try std.fs.cwd().readLink(install_path, &buf);
+
+            if (!std.mem.eql(u8, expect, on_disk)) return error.CorruptDownload;
         }
     }
 }

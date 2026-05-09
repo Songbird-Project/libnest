@@ -5,13 +5,16 @@ const MirrorList = @import("../net/MirrorList.zig");
 const Pkg = @import("Package.zig");
 
 const txn_hooks = @import("hooks.zig");
+const installer = @import("installer.zig");
 
 pub const Transaction = struct {
-    installs: std.ArrayList(Pkg) = .empty,
-    upgrades: std.ArrayList(Pkg) = .empty,
-    removes: std.ArrayList(Pkg) = .empty,
+    installs: std.ArrayList(installer.PkgInstallInfo) = .empty,
+    upgrades: std.ArrayList([]const u8) = .empty,
+    removes: std.ArrayList([]const u8) = .empty,
 
-    pub fn deinit(alloc: std.mem.Allocator, self: *Transaction) void {
+    pub fn deinit(self: *Transaction, alloc: std.mem.Allocator) void {
+        for (self.installs.items) |*item| item.deinit(alloc);
+
         self.installs.deinit(alloc);
         self.upgrades.deinit(alloc);
         self.removes.deinit(alloc);
@@ -55,6 +58,7 @@ pub const PathConfig = struct {
         alloc.free(self.root);
         alloc.free(self.cache);
         alloc.free(self.db);
+        alloc.free(self.hook);
     }
 };
 
@@ -67,7 +71,7 @@ db: Db,
 mirrors: MirrorList,
 paths: PathConfig,
 hooks: []txn_hooks.Hook = &.{},
-// txn: Transaction,
+txn: Transaction = .{},
 
 /// Callbacks
 download_cb: ?*const fn ([]const u8, f64, f64, bool) anyerror!void = null,
@@ -82,14 +86,6 @@ pub fn init(
 ) !Context {
     var p = PathConfig{
         .root = try alloc.dupe(u8, paths.root),
-        // .lib = try std.fs.path.join(alloc, &.{
-        //     paths.root,
-        //     paths.lib,
-        // }),
-        // .config = try std.fs.path.join(alloc, &.{
-        //     paths.root,
-        //     paths.config,
-        // }),
         .cache = try std.fs.path.join(alloc, &.{
             paths.root,
             paths.cache,
@@ -125,6 +121,7 @@ pub fn deinit(self: *Context) void {
     self.db.deinit();
     self.alloc.free(self.arch);
     self.paths.deinit(self.alloc);
+    self.txn.deinit(self.alloc);
 }
 
 pub fn log(

@@ -23,10 +23,8 @@ pub fn installWithDeps(
         ctx.alloc.free(pkgs);
     }
 
-    try installer.install(
-        ctx,
-        pkgs,
-    );
+    try installer.prepareInstall(ctx, pkgs);
+    try installer.install(ctx);
 }
 
 pub fn resolvePkg(
