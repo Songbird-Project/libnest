@@ -10,11 +10,6 @@ pub fn installWithDeps(
     ctx: *Context,
     pkg: Pkg,
 ) !void {
-    try ctx.log(
-        .Info,
-        .Resolve,
-        "depedencies",
-    );
     const pkgs = try resolvePkg(ctx, pkg);
     defer {
         for (pkgs) |p| {
@@ -31,6 +26,12 @@ pub fn resolvePkg(
     ctx: *Context,
     pkg: Pkg,
 ) ![]Pkg {
+    try ctx.log(
+        .Info,
+        .Resolve,
+        "depedencies",
+    );
+
     var visited = std.StringHashMap(void).init(ctx.alloc);
     defer {
         var it = visited.keyIterator();
@@ -60,7 +61,11 @@ fn resolveDeps(
         const dep = Dep.parse(d);
         if (visited.contains(dep.name)) continue;
 
-        const installed: []Pkg.Installed = try ctx.db.queryPkg(.Installed, dep.name);
+        const installed: []Pkg.Installed = try ctx.db.queryPkg(
+            .Installed,
+            dep.name,
+            null,
+        );
         defer {
             for (installed) |p| {
                 p.deinit(ctx.alloc);
@@ -69,7 +74,11 @@ fn resolveDeps(
         }
         if (installed.len > 0) continue;
 
-        const pkgs: []Pkg = try ctx.db.queryPkg(.Sync, dep.name);
+        const pkgs: []Pkg = try ctx.db.queryPkg(
+            .Sync,
+            dep.name,
+            null,
+        );
         const selected = if (pkgs.len > 1) blk: {
             if (ctx.select_cb) |cb| {
                 var names: std.ArrayList([]const u8) = .empty;

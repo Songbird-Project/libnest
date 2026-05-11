@@ -51,7 +51,11 @@ pub fn prepareInstall(
         };
         if (dup) continue;
 
-        const queried: []Pkg.Installed = try ctx.db.queryPkg(.Installed, pkg.name);
+        const queried: []Pkg.Installed = try ctx.db.queryPkg(
+            .Installed,
+            pkg.name,
+            pkg.repo,
+        );
         defer {
             for (queried) |p| {
                 p.deinit(ctx.alloc);

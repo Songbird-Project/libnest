@@ -93,30 +93,25 @@ pub fn queryPkg(
     self: *Db,
     comptime pkg_kind: PkgKind,
     name: []const u8,
+    repo: ?[]const u8,
 ) ![]PkgType(pkg_kind) {
     const T = PkgType(pkg_kind);
 
-    const query_pkgs =
-        \\SELECT json(metadata) FROM packages
-        \\WHERE name LIKE ? OR name = ?
-        \\OR EXISTS (
-        \\ SELECT 1 FROM json_each(packages.metadata, '$.provides')
-        \\ WHERE value LIKE ? OR value = ?
-        \\)
-    ;
-    const query_inst =
-        \\SELECT json(metadata) FROM installed
-        \\WHERE name LIKE ? OR name = ?
-        \\OR EXISTS (
-        \\ SELECT 1 FROM json_each(installed.metadata, '$.provides')
-        \\ WHERE value LIKE ? OR value = ?
-        \\)
-    ;
+    const table: []const u8 = if (pkg_kind == .Sync) "packages" else "installed";
+    const query = try std.fmt.allocPrint(self.alloc,
+        \\SELECT json(metadata) FROM {s}
+        \\WHERE (
+        \\  (name LIKE ? OR name = ?)
+        \\  OR EXISTS (
+        \\      SELECT 1 FROM json_each({s}.metadata, '$.provides')
+        \\      WHERE (value LIKE ? OR value = ?)
+        \\      )
+        \\  )
+        \\AND (? is NULL OR repo = ?)
+    , .{ table, table });
+    defer self.alloc.free(query);
 
-    var stmt = try if (T == Pkg.Installed)
-        self.db.prepare(query_inst)
-    else
-        self.db.prepare(query_pkgs);
+    var stmt = try self.db.prepareDynamic(query);
     defer stmt.deinit();
 
     var results: std.ArrayList(T) = .empty;
@@ -132,12 +127,17 @@ pub fn queryPkg(
     );
     defer self.alloc.free(likename);
 
-    var iter = try stmt.iterator(struct { metadata: []const u8 }, .{
-        likename,
-        name,
-        likename,
-        name,
-    });
+    var iter = try stmt.iterator(
+        struct { metadata: []const u8 },
+        .{
+            likename,
+            name,
+            likename,
+            name,
+            repo,
+            repo,
+        },
+    );
 
     while (try iter.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
