@@ -7,26 +7,26 @@ removes: std.ArrayList([]const u8) = .empty,
 
 const Txn = @This();
 
-pub fn prepare(
+pub fn update(
     self: *Txn,
     alloc: std.mem.Allocator,
     installs: []installer.PkgInstallInfo,
     upgrades: [][]const u8,
     removes: [][]const u8,
-) void {
-    for (installs) |install| try self.txn.installs.append(
+) !void {
+    for (installs) |*install| try self.installs.append(
         alloc,
-        try install.clone(),
+        try install.clone(alloc),
     );
 
-    for (upgrades) |upgrade| try self.txn.upgrades.append(
+    for (upgrades) |upgrade| try self.upgrades.append(
         alloc,
-        try self.alloc.dupe(u8, upgrade),
+        try alloc.dupe(u8, upgrade),
     );
 
-    for (removes) |remove| try self.txn.removes.append(
+    for (removes) |remove| try self.removes.append(
         alloc,
-        try self.alloc.dupe(u8, remove),
+        try alloc.dupe(u8, remove),
     );
 }
 

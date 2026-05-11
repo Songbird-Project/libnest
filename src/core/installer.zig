@@ -26,7 +26,7 @@ pub const PkgInstallInfo = struct {
         }
 
         return .{
-            .pkg = self.pkg.clone(alloc),
+            .pkg = try self.pkg.clone(alloc),
             .location = try alloc.dupe(u8, self.location),
             .cache = try alloc.dupe(u8, self.cache),
             .files = files,
@@ -55,12 +55,16 @@ const InstallerError = error{
 pub fn prepareInstall(
     ctx: *Context,
     pkgs: []Pkg,
-) !void {
+) ![]PkgInstallInfo {
     try ctx.log(
         .Info,
         .Download,
         "package files",
     );
+
+    var installs: std.ArrayList(PkgInstallInfo) = .empty;
+    defer installs.deinit(ctx.alloc);
+
     for (pkgs) |pkg| {
         const dup = dup: {
             for (ctx.txn.installs.items) |item| {
@@ -161,8 +165,10 @@ pub fn prepareInstall(
             .files = try file_list.toOwnedSlice(ctx.alloc),
         };
 
-        try ctx.txn.installs.append(ctx.alloc, info);
+        try installs.append(ctx.alloc, info);
     }
+
+    return try installs.toOwnedSlice(ctx.alloc);
 }
 
 pub fn install(

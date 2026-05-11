@@ -18,7 +18,13 @@ pub fn installWithDeps(
         ctx.alloc.free(pkgs);
     }
 
-    try installer.prepareInstall(ctx, pkgs);
+    const infos = try installer.prepareInstall(ctx, pkgs);
+    try ctx.txn.update(
+        ctx.alloc,
+        infos,
+        &.{},
+        &.{},
+    );
     try installer.install(ctx);
 }
 
