@@ -12,6 +12,27 @@ pub const PkgInstallInfo = struct {
     cache: []const u8,
     files: [][]const u8,
 
+    pub fn clone(self: *PkgInstallInfo, alloc: std.mem.Allocator) !PkgInstallInfo {
+        var files = try alloc.alloc([]const u8, self.files.len);
+        errdefer {
+            for (files) |file| {
+                alloc.free(file);
+            }
+            alloc.free(files);
+        }
+
+        for (self.files, 0..) |file, idx| {
+            files[idx] = try alloc.dupe(u8, file);
+        }
+
+        return .{
+            .pkg = self.pkg.clone(alloc),
+            .location = try alloc.dupe(u8, self.location),
+            .cache = try alloc.dupe(u8, self.cache),
+            .files = files,
+        };
+    }
+
     pub fn deinit(self: *PkgInstallInfo, alloc: std.mem.Allocator) void {
         for (self.files) |file| {
             alloc.free(file);
