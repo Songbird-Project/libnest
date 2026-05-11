@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ini = @import("ini");
 
-const Context = @import("Context.zig");
+const Txn = @import("Transaction.zig");
 
 const When = enum { Pre, Post };
 const Operator = enum { Install, Upgrade, Remove };
@@ -17,13 +17,13 @@ pub const Hook = struct {
     name: []const u8,
     exec: []const u8 = "",
     desc: ?[]const u8 = null,
-    triggers: []Trigger,
+    triggers: []Trigger = &.{},
     deps: ?[][]const u8 = null,
     when: When = .Pre,
     abort_on_fail: bool = false,
     needs_targets: bool = false,
 
-    pub fn init(ctx: *Context, path: []const u8) !Hook {
+    pub fn init(alloc: std.mem.Allocator, path: []const u8) !Hook {
         const f = try std.fs.cwd().openFile(path, .{
             .mode = .read_only,
         });
@@ -31,7 +31,7 @@ pub const Hook = struct {
         var buf: [4096]u8 = undefined;
         var reader = f.reader(&buf);
         var parser = ini.parse(
-            ctx.alloc,
+            alloc,
             &reader.interface,
             ";#",
         );
@@ -40,29 +40,29 @@ pub const Hook = struct {
             .name = path,
         };
 
-        var trigger: Trigger = undefined;
+        var trigger: ?Trigger = null;
         var current_header: enum { Trigger, Action } = .Trigger;
 
         var triggers: std.ArrayList(Trigger) = .empty;
-        defer triggers.deinit(ctx.alloc);
+        defer triggers.deinit(alloc);
 
         var ops: std.ArrayList(Operator) = .empty;
-        defer ops.deinit(ctx.alloc);
+        defer ops.deinit(alloc);
 
         var targets: std.ArrayList([]const u8) = .empty;
-        defer targets.deinit(ctx.alloc);
+        defer targets.deinit(alloc);
 
         var depends: std.ArrayList([]const u8) = .empty;
-        defer depends.deinit(ctx.alloc);
+        defer depends.deinit(alloc);
 
         while (try parser.next()) |record| {
             switch (record) {
                 .section => |header| {
                     if (std.mem.eql(u8, header, "Trigger")) {
-                        if (trigger != undefined) {
-                            trigger.ops = ops.toOwnedSlice(ctx.alloc);
+                        if (trigger != null) {
+                            trigger.?.ops = try ops.toOwnedSlice(alloc);
                             ops.clearRetainingCapacity();
-                            try triggers.append(ctx.alloc, trigger);
+                            try triggers.append(alloc, trigger.?);
                         }
                         current_header = .Trigger;
                         trigger = .{};
@@ -74,25 +74,25 @@ pub const Hook = struct {
                     if (current_header == .Trigger) {
                         if (std.mem.eql(u8, kv.key, "Type")) {
                             if (std.mem.eql(u8, kv.value, "Path"))
-                                trigger.type = .Path
+                                trigger.?.type = .Path
                             else if (std.mem.eql(u8, kv.value, "Package"))
-                                trigger.type = .Pkg;
+                                trigger.?.type = .Pkg;
                         } else if (std.mem.eql(u8, kv.key, "Operation")) {
                             if (std.mem.eql(u8, kv.value, "Install"))
-                                ops.append(ctx.alloc, .Install)
+                                try ops.append(alloc, .Install)
                             else if (std.mem.eql(u8, kv.value, "Upgrade"))
-                                try ops.append(ctx.alloc, .Upgrade)
+                                try ops.append(alloc, .Upgrade)
                             else if (std.mem.eql(u8, kv.value, "Remove"))
-                                try ops.append(ctx.alloc, .Remove);
+                                try ops.append(alloc, .Remove);
                         } else if (std.mem.eql(u8, kv.key, "Target"))
-                            try targets.append(ctx.alloc, kv.value);
+                            try targets.append(alloc, kv.value);
                     } else if (current_header == .Action) {
                         if (std.mem.eql(u8, kv.key, "Description"))
-                            hook.desc = ctx.alloc.dupe(u8, kv.value)
+                            hook.desc = try alloc.dupe(u8, kv.value)
                         else if (std.mem.eql(u8, kv.key, "Depends"))
-                            try depends.append(ctx.alloc, kv.value)
+                            try depends.append(alloc, kv.value)
                         else if (std.mem.eql(u8, kv.key, "Exec"))
-                            hook.exec = ctx.alloc.dupe(u8, kv.value)
+                            hook.exec = try alloc.dupe(u8, kv.value)
                         else if (std.mem.eql(u8, kv.key, "When")) {
                             if (std.mem.eql(u8, kv.value, "PreTransaction"))
                                 hook.when = .Pre
@@ -109,30 +109,33 @@ pub const Hook = struct {
                             hook.needs_targets = true;
                     }
                 },
-                else => {},
             }
         }
 
-        hook.triggers = triggers.toOwnedSlice(ctx.alloc);
-        hook.deps = depends.toOwnedSlice(ctx.alloc);
+        hook.triggers = try triggers.toOwnedSlice(alloc);
+        hook.deps = try depends.toOwnedSlice(alloc);
 
         return hook;
     }
 
-    pub fn deinit(self: *Hook, ctx: *Context) void {
+    pub fn deinit(self: *Hook, alloc: std.mem.Allocator) void {
         for (self.triggers) |trigger| {
-            for (trigger.targets) |target| ctx.alloc.free(target);
-            ctx.alloc.free(trigger.ops);
+            for (trigger.targets) |target| alloc.free(target);
+            alloc.free(trigger.ops);
         }
 
-        if (self.deps) |deps| for (deps) |dep| ctx.alloc.free(dep);
-        if (self.desc) |desc| ctx.alloc.free(desc);
+        if (self.deps) |deps| for (deps) |dep| alloc.free(dep);
+        if (self.desc) |desc| alloc.free(desc);
 
-        ctx.alloc.free(self.name);
-        ctx.alloc.free(self.exec);
+        alloc.free(self.name);
+        alloc.free(self.exec);
     }
 
-    pub fn tryRun(self: *Hook, ctx: *Context) !void {
+    pub fn tryRun(
+        self: *Hook,
+        alloc: std.mem.Allocator,
+        txn: Txn,
+    ) !void {
         var run: bool = false;
 
         for (self.triggers) |trigger| {
@@ -140,7 +143,7 @@ pub const Hook = struct {
                 for (trigger.targets) |target| {
                     switch (trigger.type) {
                         .Pkg => {
-                            if (op == .Install) for (ctx.txn.installs.items) |info| {
+                            if (op == .Install) for (txn.installs.items) |info| {
                                 if (std.mem.eql(
                                     u8,
                                     info.pkg.name,
@@ -149,7 +152,7 @@ pub const Hook = struct {
                             };
                         },
                         .Path => {
-                            if (op == .Install) for (ctx.txn.installs.items) |info| {
+                            if (op == .Install) for (txn.installs.items) |info| {
                                 if (std.mem.indexOf(
                                     u8,
                                     info.files,
@@ -164,7 +167,7 @@ pub const Hook = struct {
 
         var child = std.process.Child.init(&.{
             self.exec,
-        }, self.alloc);
+        }, alloc);
 
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = if (builtin.is_test) .Ignore else .Inherit;
@@ -174,27 +177,37 @@ pub const Hook = struct {
     }
 };
 
-pub fn initAll(ctx: *Context) ![]Hook {
-    var hook_dir = try std.fs.cwd().openDir(ctx.paths.hook, .{
+pub fn initAll(alloc: std.mem.Allocator, hook_path: []const u8) ![]*Hook {
+    var hook_dir = try std.fs.cwd().openDir(hook_path, .{
         .access_sub_paths = true,
         .iterate = true,
     });
     defer hook_dir.close();
     var it = hook_dir.iterate();
 
-    var hooks: std.ArrayList(Hook) = .empty;
+    var hooks: std.ArrayList(*Hook) = .empty;
 
     while (try it.nextLinux()) |entry| {
         if (entry.kind == .file and
             std.mem.endsWith(u8, entry.name, ".hook"))
-            try hooks.append(ctx.alloc, Hook.init(ctx, entry.name));
+        {
+            var hook = try Hook.init(alloc, entry.name);
+            try hooks.append(alloc, &hook);
+        }
     }
+
+    return hooks.toOwnedSlice(alloc);
 }
 
-pub fn deinitAll(ctx: *Context) void {
-    for (ctx.hooks) |hook| hook.deinit(ctx);
+pub fn deinitAll(alloc: std.mem.Allocator, hooks: []*Hook) void {
+    for (hooks) |hook| hook.deinit(alloc);
 }
 
-pub fn tryRunAll(ctx: *Context, when: When) !void {
-    for (ctx.hooks) |hook| if (hook.when == when) hook.run(ctx);
+pub fn tryRunAll(
+    alloc: std.mem.Allocator,
+    txn: Txn,
+    hooks: []*Hook,
+    when: When,
+) !void {
+    for (hooks) |hook| if (hook.when == when) hook.run(alloc, txn);
 }
