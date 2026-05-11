@@ -113,6 +113,7 @@ pub fn deinit(self: *Context) void {
     self.alloc.free(self.arch);
     self.paths.deinit(self.alloc);
     self.txn.deinit(self.alloc);
+    txn_hooks.deinitAll(self.alloc, self.hooks);
 }
 
 pub fn log(
