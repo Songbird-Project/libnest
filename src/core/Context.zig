@@ -3,23 +3,10 @@ const std = @import("std");
 const Db = @import("Database.zig");
 const MirrorList = @import("../net/MirrorList.zig");
 const Pkg = @import("Package.zig");
+const Txn = @import("Transaction.zig");
 
 const txn_hooks = @import("hooks.zig");
 const installer = @import("installer.zig");
-
-pub const Transaction = struct {
-    installs: std.ArrayList(installer.PkgInstallInfo) = .empty,
-    upgrades: std.ArrayList([]const u8) = .empty,
-    removes: std.ArrayList([]const u8) = .empty,
-
-    pub fn deinit(self: *Transaction, alloc: std.mem.Allocator) void {
-        for (self.installs.items) |*item| item.deinit(alloc);
-
-        self.installs.deinit(alloc);
-        self.upgrades.deinit(alloc);
-        self.removes.deinit(alloc);
-    }
-};
 
 pub const LogLevel = enum(u8) {
     Debug,
@@ -70,8 +57,8 @@ arch: []const u8,
 db: Db,
 mirrors: MirrorList,
 paths: PathConfig,
-hooks: []txn_hooks.Hook = &.{},
-txn: Transaction = .{},
+hooks: []*txn_hooks.Hook,
+txn: Txn = .{},
 
 /// Callbacks
 download_cb: ?*const fn ([]const u8, f64, f64, bool) anyerror!void = null,
@@ -107,12 +94,16 @@ pub fn init(
     var mirrors = try MirrorList.init(alloc, mirrorlist_path);
     errdefer mirrors.deinit();
 
+    const hooks = try txn_hooks.initAll(alloc, p.hook);
+    errdefer txn_hooks.deinitAll(alloc, hooks);
+
     return .{
         .alloc = alloc,
         .arch = try alloc.dupe(u8, arch),
         .db = db,
         .mirrors = mirrors,
         .paths = p,
+        .hooks = hooks,
     };
 }
 
