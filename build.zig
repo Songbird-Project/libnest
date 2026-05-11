@@ -17,6 +17,11 @@ pub fn build(b: *std.Build) void {
         "test",
         "Test to run",
     ) orelse &.{};
+    const skip_tests = b.option(
+        bool,
+        "skip-tests",
+        "Skip testing and just build",
+    ) orelse false;
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -52,27 +57,29 @@ pub fn build(b: *std.Build) void {
     });
     module.addImport("ini", ini.module("ini"));
 
-    const tests = b.addTest(.{
-        .root_module = b.addModule("tests", .{
-            .root_source_file = b.path("src/tests.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        .use_llvm = true,
-        .filters = test_filters,
-    });
+    if (!skip_tests) {
+        const tests = b.addTest(.{
+            .root_module = b.addModule("tests", .{
+                .root_source_file = b.path("src/tests.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .use_llvm = true,
+            .filters = test_filters,
+        });
 
-    tests.linkSystemLibrary("curl");
-    tests.linkSystemLibrary("archive");
-    tests.linkSystemLibrary("git2");
-    tests.linkLibC();
-    tests.root_module.addImport("curl", curl.module("curl"));
-    tests.root_module.addImport("sqlite", sqlite.module("sqlite"));
+        tests.linkSystemLibrary("curl");
+        tests.linkSystemLibrary("archive");
+        tests.linkSystemLibrary("git2");
+        tests.linkLibC();
+        tests.root_module.addImport("curl", curl.module("curl"));
+        tests.root_module.addImport("sqlite", sqlite.module("sqlite"));
 
-    const run_tests = b.addRunArtifact(tests);
+        const run_tests = b.addRunArtifact(tests);
 
-    const test_step = b.step("test", "Run libnest tests");
-    test_step.dependOn(&run_tests.step);
+        const test_step = b.step("test", "Run libnest tests");
+        test_step.dependOn(&run_tests.step);
+    }
 
     if (emit_dynamic) {
         const lib = b.addLibrary(.{
