@@ -1,6 +1,8 @@
 const std = @import("std");
 const installer = @import("installer.zig");
 
+const Pkg = @import("Package.zig");
+
 installs: std.ArrayList(installer.PkgInstallInfo) = .empty,
 upgrades: std.ArrayList([]const u8) = .empty,
 removes: std.ArrayList([]const u8) = .empty,
@@ -11,8 +13,8 @@ pub fn update(
     self: *Txn,
     alloc: std.mem.Allocator,
     installs: []installer.PkgInstallInfo,
-    upgrades: [][]const u8,
-    removes: [][]const u8,
+    upgrades: []const []const u8,
+    removes: []const []const u8,
 ) !void {
     for (installs) |*install| try self.installs.append(
         alloc,
