@@ -47,7 +47,7 @@ pub const PkgInstallInfo = struct {
 };
 
 const InstallerError = error{
-    FailedToGetPackageId,
+    FailedToGetTarget,
     AlreadyInstalled,
     RelativePathInPackage,
 };
@@ -400,32 +400,32 @@ pub fn useMTREE(
 
 pub fn uninstall(
     ctx: *Context,
-    pkgname: []const u8,
-    repo: []const u8,
 ) !void {
-    const pkgid = try ctx.db.db.oneAlloc(
-        i64,
-        ctx.alloc,
-        "SELECT id FROM installed WHERE name = ? AND repo = ?",
-        .{},
-        .{ pkgname, repo },
-    );
+    for (ctx.txn.removes.items) |name| {
+        const pkgid = try ctx.db.db.oneAlloc(
+            i64,
+            ctx.alloc,
+            "SELECT id FROM installed WHERE name = ?",
+            .{},
+            .{name},
+        );
 
-    if (pkgid == null) return error.FailedToGetPackageId;
+        if (pkgid == null) return error.FailedToGetTarget;
 
-    var stmt = try ctx.db.db.prepare("SELECT path FROM files WHERE pkgid = ?");
-    defer stmt.deinit();
+        var stmt = try ctx.db.db.prepare("SELECT path FROM files WHERE pkgid = ?");
+        defer stmt.deinit();
 
-    var iter = try stmt.iterator([]const u8, .{pkgid});
-    while (try iter.nextAlloc(ctx.alloc, .{})) |path| {
-        defer ctx.alloc.free(path);
-        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
+        var iter = try stmt.iterator([]const u8, .{pkgid.?});
+        while (try iter.nextAlloc(ctx.alloc, .{})) |path| {
+            defer ctx.alloc.free(path);
+            std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+        }
+
+        try ctx.db.db.exec(
+            \\DELETE FROM installed WHERE id = ?
+        , .{}, .{pkgid.?});
     }
-
-    try ctx.db.db.exec(
-        \\DELETE FROM installed WHERE id = ?
-    , .{}, .{pkgid.?});
 }
