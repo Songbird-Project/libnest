@@ -11,6 +11,8 @@ const desc = @import("../parse/desc.zig");
 const DbError = error{
     RelativePathInPkg,
     RelativePathInMTREE,
+    CorruptDatabase,
+    InvalidDatabase,
 };
 
 const PkgKind = enum {
@@ -150,6 +152,8 @@ pub fn queryPkg(
         try results.append(self.alloc, try parsed.value.clone(self.alloc));
         self.alloc.free(row.metadata);
     }
+
+    if (repo != null and results.items.len > 1) return error.InvalidDatabase;
 
     return results.toOwnedSlice(self.alloc);
 }
