@@ -11,6 +11,7 @@ const installer = @import("installer.zig");
 pub const LogLevel = enum(u8) {
     Debug,
     Info,
+    Warn,
     Error,
     Fatal,
 };
@@ -18,6 +19,7 @@ pub const LogLevel = enum(u8) {
 pub const Action = enum(u8) {
     Install,
     Uninstall,
+    Upgrade,
     Resolve,
     Build,
     Sync,
@@ -27,6 +29,7 @@ pub const Action = enum(u8) {
         try switch (self) {
             .Install => writer.writeAll("Installing"),
             .Uninstall => writer.writeAll("Uninstalling"),
+            .Upgrade => writer.writeAll("Upgrade"),
             .Resolve => writer.writeAll("Resolving"),
             .Build => writer.writeAll("Building"),
             .Sync => writer.writeAll("Syncing"),
@@ -38,7 +41,7 @@ pub const Action = enum(u8) {
 pub const PathConfig = struct {
     root: []const u8 = "/",
     cache: []const u8 = "var/cache/libnest",
-    db: []const u8 = "etc/libnest",
+    config: []const u8 = "etc/libnest",
     hook: []const u8 = "etc/libnest/hooks",
 
     pub fn deinit(self: *PathConfig, alloc: std.mem.Allocator) void {
@@ -68,7 +71,6 @@ log_cb: ?*const fn (LogLevel, Action, []const u8) anyerror!void = null,
 pub fn init(
     alloc: std.mem.Allocator,
     arch: []const u8,
-    mirrorlist_path: []const u8,
     paths: PathConfig,
 ) !Context {
     var p = PathConfig{
@@ -77,9 +79,9 @@ pub fn init(
             paths.root,
             paths.cache,
         }),
-        .db = try std.fs.path.join(alloc, &.{
+        .config = try std.fs.path.join(alloc, &.{
             paths.root,
-            paths.db,
+            paths.config,
         }),
         .hook = try std.fs.path.join(alloc, &.{
             paths.root,
@@ -88,10 +90,15 @@ pub fn init(
     };
     errdefer p.deinit(alloc);
 
-    var db = try Db.init(alloc, p.db);
+    try std.fs.cwd().makePath(p.root);
+    try std.fs.cwd().makePath(p.cache);
+    try std.fs.cwd().makePath(p.config);
+    try std.fs.cwd().makePath(p.hook);
+
+    var db = try Db.init(alloc, p.config);
     errdefer db.deinit();
 
-    var mirrors = try MirrorList.init(alloc, mirrorlist_path);
+    var mirrors = try MirrorList.init(alloc, p.config);
     errdefer mirrors.deinit();
 
     const hooks = try txn_hooks.initAll(alloc, p.hook);
