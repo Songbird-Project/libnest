@@ -11,9 +11,15 @@ alloc: std.mem.Allocator,
 mirrors: [][]const u8,
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8) !MirrorList {
+    const mirror_path = try std.fs.path.join(alloc, &.{
+        path,
+        "mirrorlist",
+    });
+    defer alloc.free(mirror_path);
+
     const mirror_file = try std.fs.cwd().readFileAlloc(
         alloc,
-        path,
+        mirror_path,
         1024 * 1024,
     );
     defer alloc.free(mirror_file);
