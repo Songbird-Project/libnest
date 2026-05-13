@@ -52,7 +52,7 @@ pub fn resolvePkg(
         &visited,
         &pkgs,
     );
-    try pkgs.append(ctx.alloc, pkg);
+    try pkgs.append(ctx.alloc, try pkg.clone(ctx.alloc));
 
     return pkgs.toOwnedSlice(ctx.alloc);
 }
