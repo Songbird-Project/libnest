@@ -1,10 +1,11 @@
 const std = @import("std");
 const installer = @import("installer.zig");
+const upgrader = @import("upgrader.zig");
 
 const Pkg = @import("Package.zig");
 
 installs: std.ArrayList(installer.PkgInstallInfo) = .empty,
-upgrades: std.ArrayList([]const u8) = .empty,
+upgrades: std.ArrayList(Pkg) = .empty,
 removes: std.ArrayList([]const u8) = .empty,
 
 const Txn = @This();
@@ -13,7 +14,7 @@ pub fn update(
     self: *Txn,
     alloc: std.mem.Allocator,
     installs: []installer.PkgInstallInfo,
-    upgrades: []const []const u8,
+    upgrades: []Pkg,
     removes: []const []const u8,
 ) !void {
     for (installs) |*install| try self.installs.append(
@@ -23,7 +24,7 @@ pub fn update(
 
     for (upgrades) |upgrade| try self.upgrades.append(
         alloc,
-        try alloc.dupe(u8, upgrade),
+        try upgrade.clone(alloc),
     );
 
     for (removes) |remove| try self.removes.append(
@@ -34,7 +35,7 @@ pub fn update(
 
 pub fn deinit(self: *Txn, alloc: std.mem.Allocator) void {
     for (self.installs.items) |*item| item.deinit(alloc);
-    for (self.upgrades.items) |item| alloc.free(item);
+    for (self.upgrades.items) |item| item.deinit(alloc);
     for (self.removes.items) |item| alloc.free(item);
 
     self.installs.deinit(alloc);
