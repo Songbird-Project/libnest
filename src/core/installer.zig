@@ -175,8 +175,8 @@ pub fn install(
     ctx: *Context,
 ) !void {
     var stmt = try ctx.db.db.prepare(
-        \\INSERT INTO installed (name, repo, metadata)
-        \\VALUES (?, ?, jsonb(?))
+        \\INSERT INTO installed (name, repo, version, metadata)
+        \\VALUES (?, ?, ?, jsonb(?))
         \\ON CONFLICT(name, repo) DO UPDATE SET
         \\metadata = excluded.metadata
         \\WHERE metadata != excluded.metadata
