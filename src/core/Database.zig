@@ -61,6 +61,7 @@ pub fn init(
         \\ id INTEGER PRIMARY KEY,
         \\ name TEXT NOT NULL,
         \\ repo TEXT NOT NULL,
+        \\ version TEXT NOT NULL,
         \\ metadata JSONB,
         \\ UNIQUE(name,repo)
         \\);
@@ -75,6 +76,7 @@ pub fn init(
         \\ id INTEGER PRIMARY KEY,
         \\ name TEXT NOT NULL,
         \\ repo TEXT NOT NULL,
+        \\ version TEXT NOT NULL,
         \\ metadata JSONB,
         \\ UNIQUE(name,repo)
         \\);
@@ -129,7 +131,7 @@ pub fn queryPkg(
     );
     defer self.alloc.free(likename);
 
-    var iter = try stmt.iterator(
+    var it = try stmt.iterator(
         struct { metadata: []const u8 },
         .{
             likename,
@@ -141,7 +143,7 @@ pub fn queryPkg(
         },
     );
 
-    while (try iter.nextAlloc(self.alloc, .{})) |row| {
+    while (try it.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
             T,
             self.alloc,
@@ -165,7 +167,6 @@ pub fn insert(
 ) !void {
     var stmt = try self.db.prepare(
         \\INSERT INTO files (pkgid, path) VALUES (?, ?)
-        ,
     );
     defer stmt.deinit();
 
@@ -191,6 +192,7 @@ pub fn insertPkg(
     try stmt.exec(.{}, .{
         val.name,
         repo,
+        val.version,
         writer.written(),
     });
 
@@ -204,8 +206,8 @@ pub fn sync(
     batch_size: usize,
 ) !void {
     var stmt = try self.db.prepare(
-        \\INSERT INTO packages (name, repo, metadata)
-        \\VALUES (?, ?, jsonb(?))
+        \\INSERT INTO packages (name, repo, version, metadata)
+        \\VALUES (?, ?, ?, jsonb(?))
         \\ON CONFLICT(name, repo) DO UPDATE SET
         \\metadata = excluded.metadata
         \\WHERE metadata != excluded.metadata
@@ -263,13 +265,7 @@ pub fn sync(
 
         const is_desc = std.mem.eql(u8, pathrepo[delim.? + 1 ..], "desc");
 
-        if (!is_desc) {
-            while (true) {
-                const bytes = try reader.readData(&buf);
-                if (bytes == 0) break;
-            }
-            continue;
-        }
+        if (!is_desc) continue;
 
         var content: std.ArrayList(u8) = .empty;
         defer content.deinit(self.alloc);
