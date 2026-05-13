@@ -47,7 +47,7 @@ pub const PathConfig = struct {
     pub fn deinit(self: *PathConfig, alloc: std.mem.Allocator) void {
         alloc.free(self.root);
         alloc.free(self.cache);
-        alloc.free(self.db);
+        alloc.free(self.config);
         alloc.free(self.hook);
     }
 };
