@@ -57,7 +57,7 @@ pub fn init(
     _ = try db.pragma(void, .{}, "cache_size", "-200000");
 
     try db.execMulti(
-        \\CREATE TABLE IF NOT EXISTS packages(
+        \\CREATE TABLE IF NOT EXISTS sync(
         \\ id INTEGER PRIMARY KEY,
         \\ name TEXT NOT NULL,
         \\ repo TEXT NOT NULL,
