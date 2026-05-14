@@ -32,6 +32,10 @@ pub fn resolvePkg(
     ctx: *Context,
     pkg: Pkg,
 ) ![]Pkg {
+    for (ctx.txn.installs.items) |item| {
+        if (std.mem.eql(u8, item.pkg.name, pkg.name)) return &.{};
+    }
+
     try ctx.log(
         .Info,
         .Resolve,
@@ -66,6 +70,12 @@ fn resolveDeps(
     for (pkg.deps) |d| {
         const dep = Dep.parse(d);
         if (visited.contains(dep.name)) continue;
+
+        var skip = false;
+        for (ctx.txn.installs.items) |item| {
+            if (std.mem.eql(u8, item.pkg.name, dep.name)) skip = true;
+        }
+        if (skip) continue;
 
         const installed: []Pkg.Installed = try ctx.db.queryPkg(
             .Installed,
