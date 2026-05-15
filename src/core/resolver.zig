@@ -77,8 +77,7 @@ fn resolveDeps(
         }
         if (skip) continue;
 
-        const installed: []Pkg.Installed = try ctx.db.queryPkg(
-            .Installed,
+        const installed: []Pkg.Installed = try ctx.db.queryInstalled(
             dep.name,
             null,
         );
@@ -90,8 +89,7 @@ fn resolveDeps(
         }
         if (installed.len > 0) continue;
 
-        const pkgs: []Pkg = try ctx.db.queryPkg(
-            .Sync,
+        const pkgs: []Pkg = try ctx.db.querySync(
             dep.name,
             null,
         );

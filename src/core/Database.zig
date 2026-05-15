@@ -8,6 +8,42 @@ const Pkg = @import("Package.zig");
 const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
 
+pub const DBConfig = struct {
+    insert_sync_stmt: sqlite.DynamicStatement,
+    insert_installed_stmt: sqlite.DynamicStatement,
+
+    pub fn init(
+        db: *sqlite.Db,
+    ) !DBConfig {
+        errdefer std.debug.print("{f}\n", .{db.getDetailedError()});
+
+        const sync_stmt = try db.prepareDynamic(
+            \\INSERT INTO sync (name, repo, version, metadata)
+            \\VALUES (?, ?, ?, jsonb(?))
+            \\ON CONFLICT(name, repo) DO UPDATE SET
+            \\metadata = excluded.metadata
+            \\WHERE metadata != excluded.metadata
+        );
+        const installed_stmt = try db.prepareDynamic(
+            \\INSERT INTO installed (name, repo, version, explicit, metadata)
+            \\VALUES (?, ?, ?, ?, jsonb(?))
+            \\ON CONFLICT(name, repo) DO UPDATE SET
+            \\metadata = excluded.metadata
+            \\WHERE metadata != excluded.metadata
+        );
+
+        return .{
+            .insert_sync_stmt = sync_stmt,
+            .insert_installed_stmt = installed_stmt,
+        };
+    }
+
+    pub fn deinit(self: *DBConfig) void {
+        self.insert_sync_stmt.deinit();
+        self.insert_installed_stmt.deinit();
+    }
+};
+
 const DbError = error{
     RelativePathInPkg,
     RelativePathInMTREE,
@@ -15,22 +51,11 @@ const DbError = error{
     InvalidDatabase,
 };
 
-const PkgKind = enum {
-    Sync,
-    Installed,
-};
-
-fn PkgType(comptime pkg_type: PkgKind) type {
-    return switch (pkg_type) {
-        .Sync => Pkg,
-        .Installed => Pkg.Installed,
-    };
-}
-
 const Db = @This();
 
 alloc: std.mem.Allocator,
 db: *sqlite.Db,
+config: *DBConfig,
 
 pub fn init(
     alloc: std.mem.Allocator,
@@ -58,67 +83,65 @@ pub fn init(
 
     try db.execMulti(
         \\CREATE TABLE IF NOT EXISTS sync(
-        \\ id INTEGER PRIMARY KEY,
-        \\ name TEXT NOT NULL,
-        \\ repo TEXT NOT NULL,
-        \\ version TEXT NOT NULL,
-        \\ metadata JSONB,
-        \\ UNIQUE(name,repo)
+        \\  id INTEGER PRIMARY KEY,
+        \\  name TEXT NOT NULL,
+        \\  repo TEXT NOT NULL,
+        \\  version TEXT NOT NULL,
+        \\  metadata JSONB,
+        \\  UNIQUE(name,repo)
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS files(
-        \\ pkgid INTEGER NOT NULL,
-        \\ path TEXT,
-        \\ FOREIGN KEY(pkgid) REFERENCES installed(id) ON DELETE CASCADE
+        \\  pkgid INTEGER NOT NULL,
+        \\  path TEXT,
+        \\  FOREIGN KEY(pkgid) REFERENCES installed(id) ON DELETE CASCADE
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS installed(
-        \\ id INTEGER PRIMARY KEY,
-        \\ name TEXT NOT NULL,
-        \\ repo TEXT NOT NULL,
-        \\ version TEXT NOT NULL,
-        \\ metadata JSONB,
-        \\ UNIQUE(name,repo)
+        \\  id INTEGER PRIMARY KEY,
+        \\  name TEXT NOT NULL,
+        \\  repo TEXT NOT NULL,
+        \\  version TEXT NOT NULL,
+        \\  explicit BOOL,
+        \\  metadata JSONB,
+        \\  UNIQUE(name,repo)
         \\);
     , .{});
+
+    var config = try DBConfig.init(db);
 
     return .{
         .alloc = alloc,
         .db = db,
+        .config = &config,
     };
 }
 
 pub fn deinit(self: *Db) void {
     self.db.deinit();
     self.alloc.destroy(self.db);
+    self.config.deinit();
 }
 
-pub fn queryPkg(
+pub fn querySync(
     self: *Db,
-    comptime pkg_kind: PkgKind,
     name: []const u8,
     repo: ?[]const u8,
-) ![]PkgType(pkg_kind) {
-    const T = PkgType(pkg_kind);
-
-    const table: []const u8 = if (pkg_kind == .Sync) "packages" else "installed";
-    const query = try std.fmt.allocPrint(self.alloc,
-        \\SELECT json(metadata) FROM {s}
+) ![]Pkg {
+    var stmt = try self.db.prepareDynamic(
+        \\SELECT json(metadata) FROM sync
         \\WHERE (
         \\  (name LIKE ? OR name = ?)
         \\  OR EXISTS (
-        \\      SELECT 1 FROM json_each({s}.metadata, '$.provides')
+        \\      SELECT 1 FROM json_each(sync.metadata, '$.provides')
         \\      WHERE (value LIKE ? OR value = ?)
         \\      )
         \\  )
         \\AND (? is NULL OR repo = ?)
-    , .{ table, table });
-    defer self.alloc.free(query);
-
-    var stmt = try self.db.prepareDynamic(query);
+    );
     defer stmt.deinit();
 
-    var results: std.ArrayList(T) = .empty;
+    var results: std.ArrayList(Pkg) = .empty;
     errdefer {
         for (results.items) |r| r.deinit(self.alloc);
         results.deinit(self.alloc);
@@ -145,7 +168,7 @@ pub fn queryPkg(
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
-            T,
+            Pkg,
             self.alloc,
             row.metadata,
             .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
@@ -160,7 +183,67 @@ pub fn queryPkg(
     return results.toOwnedSlice(self.alloc);
 }
 
-pub fn insert(
+pub fn queryInstalled(
+    self: *Db,
+    name: []const u8,
+    repo: ?[]const u8,
+) ![]Pkg.Installed {
+    var stmt = try self.db.prepareDynamic(
+        \\SELECT json(metadata) FROM installed
+        \\WHERE (
+        \\  (name LIKE ? OR name = ?)
+        \\  OR EXISTS (
+        \\      SELECT 1 FROM json_each(installed.metadata, '$.provides')
+        \\      WHERE (value LIKE ? OR value = ?)
+        \\      )
+        \\  )
+        \\AND (? is NULL OR repo = ?)
+    );
+    defer stmt.deinit();
+
+    var results: std.ArrayList(Pkg.Installed) = .empty;
+    errdefer {
+        for (results.items) |r| r.deinit(self.alloc);
+        results.deinit(self.alloc);
+    }
+
+    const likename = try std.fmt.allocPrint(
+        self.alloc,
+        "{s}=%",
+        .{name},
+    );
+    defer self.alloc.free(likename);
+
+    var it = try stmt.iterator(
+        struct { metadata: []const u8 },
+        .{
+            likename,
+            name,
+            likename,
+            name,
+            repo,
+            repo,
+        },
+    );
+
+    while (try it.nextAlloc(self.alloc, .{})) |row| {
+        const parsed = try std.json.parseFromSlice(
+            Pkg.Installed,
+            self.alloc,
+            row.metadata,
+            .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+        );
+        defer parsed.deinit();
+        try results.append(self.alloc, try parsed.value.clone(self.alloc));
+        self.alloc.free(row.metadata);
+    }
+
+    if (repo != null and results.items.len > 1) return error.InvalidDatabase;
+
+    return results.toOwnedSlice(self.alloc);
+}
+
+pub fn insertFile(
     self: *Db,
     pkgid: i64,
     path: []const u8,
@@ -176,25 +259,45 @@ pub fn insert(
     });
 }
 
-pub fn insertPkg(
+pub fn insertSync(
     self: *Db,
-    repo: []const u8,
-    val: anytype,
-    stmt: anytype,
+    pkg: Pkg,
+) !void {
+    errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
+
+    var writer = std.io.Writer.Allocating.init(self.alloc);
+    const w = &writer.writer;
+    defer writer.deinit();
+    try std.json.Stringify.value(pkg, .{}, w);
+    try self.config.insert_sync_stmt.exec(.{}, .{
+        pkg.name,
+        pkg.repo,
+        pkg.version,
+        writer.written(),
+    });
+}
+
+pub fn insertInstalled(
+    self: *Db,
+    explicit: bool,
+    pkg: Pkg.Installed,
 ) !i64 {
     errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
 
     var writer = std.io.Writer.Allocating.init(self.alloc);
     const w = &writer.writer;
     defer writer.deinit();
-    try std.json.Stringify.value(val, .{}, w);
+    try std.json.Stringify.value(pkg, .{}, w);
 
-    try stmt.exec(.{}, .{
-        val.name,
-        repo,
-        val.version,
+    try self.config.insert_installed_stmt.exec(.{}, .{
+        pkg.name,
+        pkg.repo,
+        pkg.version,
+        explicit,
         writer.written(),
     });
+
+    self.config.insert_installed_stmt.reset();
 
     return self.db.getLastInsertRowID();
 }

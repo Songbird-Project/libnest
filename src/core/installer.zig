@@ -11,6 +11,7 @@ pub const PkgInstallInfo = struct {
     location: []const u8,
     cache: []const u8,
     files: [][]const u8,
+    explicit: bool,
 
     pub fn clone(self: *PkgInstallInfo, alloc: std.mem.Allocator) !PkgInstallInfo {
         var files = try alloc.alloc([]const u8, self.files.len);
@@ -30,6 +31,7 @@ pub const PkgInstallInfo = struct {
             .location = try alloc.dupe(u8, self.location),
             .cache = try alloc.dupe(u8, self.cache),
             .files = files,
+            .explicit = self.explicit,
         };
     }
 
@@ -65,7 +67,9 @@ pub fn prepareInstall(
     var installs: std.ArrayList(PkgInstallInfo) = .empty;
     defer installs.deinit(ctx.alloc);
 
-    for (pkgs) |pkg| {
+    for (pkgs, 0..) |pkg, idx| {
+        const explicit = if (idx == pkgs.len - 1) false else true;
+
         const dup = dup: {
             for (ctx.txn.installs.items) |item| {
                 if (std.mem.eql(u8, item.pkg.name, pkg.name) and
@@ -76,8 +80,7 @@ pub fn prepareInstall(
         };
         if (dup) continue;
 
-        const queried: []Pkg.Installed = try ctx.db.queryPkg(
-            .Installed,
+        const queried: []Pkg.Installed = try ctx.db.queryInstalled(
             pkg.name,
             pkg.repo,
         );
@@ -163,6 +166,7 @@ pub fn prepareInstall(
             .location = try ctx.alloc.dupe(u8, dest),
             .cache = try ctx.alloc.dupe(u8, cache),
             .files = try file_list.toOwnedSlice(ctx.alloc),
+            .explicit = explicit,
         };
 
         try installs.append(ctx.alloc, info);
@@ -174,16 +178,6 @@ pub fn prepareInstall(
 pub fn install(
     ctx: *Context,
 ) !void {
-    var stmt = try ctx.db.db.prepare(
-        \\INSERT INTO installed (name, repo, version, metadata)
-        \\VALUES (?, ?, ?, jsonb(?))
-        \\ON CONFLICT(name, repo) DO UPDATE SET
-        \\metadata = excluded.metadata
-        \\WHERE metadata != excluded.metadata
-        ,
-    );
-    defer stmt.deinit();
-
     for (ctx.txn.installs.items) |info| {
         try ctx.log(
             .Info,
@@ -259,9 +253,8 @@ pub fn install(
             ctx,
             info.pkg.repo,
             pkginfo_path,
-            &stmt,
+            info.explicit,
         );
-        stmt.reset();
 
         const mtree_path = try std.fs.path.join(ctx.alloc, &.{
             info.cache,
@@ -275,7 +268,7 @@ pub fn install(
         );
 
         for (info.files) |installed| {
-            try ctx.db.insert(pkgid, installed);
+            try ctx.db.insertFile(pkgid, installed);
         }
     }
 }

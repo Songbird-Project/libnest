@@ -7,7 +7,7 @@ pub fn index(
     ctx: *Context,
     repo: []const u8,
     path: []const u8,
-    stmt: anytype,
+    explicit: bool,
 ) !i64 {
     const pkg = try parse(
         ctx.alloc,
@@ -16,10 +16,9 @@ pub fn index(
     );
     defer pkg.deinit(ctx.alloc);
 
-    return try ctx.db.insertPkg(
-        repo,
+    return try ctx.db.insertInstalled(
+        explicit,
         pkg,
-        stmt,
     );
 }
 
