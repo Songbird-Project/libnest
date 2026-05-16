@@ -11,6 +11,7 @@ const desc = @import("../parse/desc.zig");
 pub const DBConfig = struct {
     insert_sync_stmt: sqlite.DynamicStatement,
     insert_installed_stmt: sqlite.DynamicStatement,
+    insert_file_stmt: sqlite.DynamicStatement,
 
     pub fn init(
         db: *sqlite.Db,
@@ -31,16 +32,21 @@ pub const DBConfig = struct {
             \\metadata = excluded.metadata
             \\WHERE metadata != excluded.metadata
         );
+        const file_stmt = try db.prepareDynamic(
+            \\INSERT INTO files (pkgid, path) VALUES (?, ?)
+        );
 
         return .{
             .insert_sync_stmt = sync_stmt,
             .insert_installed_stmt = installed_stmt,
+            .insert_file_stmt = file_stmt,
         };
     }
 
     pub fn deinit(self: *DBConfig) void {
         self.insert_sync_stmt.deinit();
         self.insert_installed_stmt.deinit();
+        self.insert_file_stmt.deinit();
     }
 };
 
@@ -108,19 +114,22 @@ pub fn init(
         \\);
     , .{});
 
-    var config = try DBConfig.init(db);
+    const config = try alloc.create(DBConfig);
+    config.* = try DBConfig.init(db);
+    errdefer alloc.destroy(config);
 
     return .{
         .alloc = alloc,
         .db = db,
-        .config = &config,
+        .config = config,
     };
 }
 
 pub fn deinit(self: *Db) void {
-    self.db.deinit();
-    self.alloc.destroy(self.db);
     self.config.deinit();
+    self.db.deinit();
+    self.alloc.destroy(self.config);
+    self.alloc.destroy(self.db);
 }
 
 pub fn querySync(
@@ -248,15 +257,11 @@ pub fn insertFile(
     pkgid: i64,
     path: []const u8,
 ) !void {
-    var stmt = try self.db.prepare(
-        \\INSERT INTO files (pkgid, path) VALUES (?, ?)
-    );
-    defer stmt.deinit();
-
-    try stmt.exec(.{}, .{
+    try self.config.insert_file_stmt.exec(.{}, .{
         pkgid,
         path,
     });
+    defer self.config.insert_file_stmt.reset();
 }
 
 pub fn insertSync(
@@ -275,6 +280,7 @@ pub fn insertSync(
         pkg.version,
         writer.written(),
     });
+    defer self.config.insert_sync_stmt.reset();
 }
 
 pub fn insertInstalled(
@@ -296,8 +302,7 @@ pub fn insertInstalled(
         explicit,
         writer.written(),
     });
-
-    self.config.insert_installed_stmt.reset();
+    defer self.config.insert_installed_stmt.reset();
 
     return self.db.getLastInsertRowID();
 }
@@ -308,8 +313,9 @@ pub fn sync(
     repo: []const u8,
     batch_size: usize,
 ) !void {
+    errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
     var stmt = try self.db.prepare(
-        \\INSERT INTO packages (name, repo, version, metadata)
+        \\INSERT INTO sync (name, repo, version, metadata)
         \\VALUES (?, ?, ?, jsonb(?))
         \\ON CONFLICT(name, repo) DO UPDATE SET
         \\metadata = excluded.metadata
@@ -394,7 +400,6 @@ pub fn sync(
                 ctx,
                 content.items,
                 repo,
-                &stmt,
             );
             stmt.reset();
 
