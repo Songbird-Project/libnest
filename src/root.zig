@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const version = @import("core/version.zig");
 pub const installer = @import("core/installer.zig");
+pub const upgrader = @import("core/upgrader.zig");
 pub const resolver = @import("core/resolver.zig");
 
 pub const Context = @import("core/Context.zig");
