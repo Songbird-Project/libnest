@@ -12,6 +12,9 @@ pub const DBConfig = struct {
     insert_sync_stmt: sqlite.DynamicStatement,
     insert_installed_stmt: sqlite.DynamicStatement,
     insert_file_stmt: sqlite.DynamicStatement,
+    query_sync_stmt: sqlite.DynamicStatement,
+    query_installed_stmt: sqlite.DynamicStatement,
+    hash_stmt: sqlite.DynamicStatement,
 
     pub fn init(
         db: *sqlite.Db,
@@ -19,8 +22,8 @@ pub const DBConfig = struct {
         errdefer std.debug.print("{f}\n", .{db.getDetailedError()});
 
         const sync_stmt = try db.prepareDynamic(
-            \\INSERT INTO sync (name, repo, version, metadata)
-            \\VALUES (?, ?, ?, jsonb(?))
+            \\INSERT INTO sync (name, repo, version, desc_hash, metadata)
+            \\VALUES (?, ?, ?, ?, jsonb(?))
             \\ON CONFLICT(name, repo) DO UPDATE SET
             \\metadata = excluded.metadata
             \\WHERE metadata != excluded.metadata
@@ -35,11 +38,39 @@ pub const DBConfig = struct {
         const file_stmt = try db.prepareDynamic(
             \\INSERT INTO files (pkgid, path) VALUES (?, ?)
         );
+        const sync_query = try db.prepareDynamic(
+            \\SELECT json(metadata) FROM sync
+            \\WHERE (
+            \\  (name LIKE ? OR name = ?)
+            \\  OR EXISTS (
+            \\      SELECT 1 FROM json_each(sync.metadata, '$.provides')
+            \\      WHERE (value LIKE ? OR value = ?)
+            \\      )
+            \\  )
+            \\AND (? is NULL OR repo = ?)
+        );
+        const installed_query = try db.prepareDynamic(
+            \\SELECT json(metadata) FROM installed
+            \\WHERE (
+            \\  (name LIKE ? OR name = ?)
+            \\  OR EXISTS (
+            \\      SELECT 1 FROM json_each(installed.metadata, '$.provides')
+            \\      WHERE (value LIKE ? OR value = ?)
+            \\      )
+            \\  )
+            \\AND (? is NULL OR repo = ?)
+        );
+        const hash_stmt = try db.prepareDynamic(
+            \\SELECT desc_hash FROM sync WHERE name = ? AND repo = ?
+        );
 
         return .{
             .insert_sync_stmt = sync_stmt,
             .insert_installed_stmt = installed_stmt,
             .insert_file_stmt = file_stmt,
+            .query_sync_stmt = sync_query,
+            .query_installed_stmt = installed_query,
+            .hash_stmt = hash_stmt,
         };
     }
 
@@ -47,6 +78,9 @@ pub const DBConfig = struct {
         self.insert_sync_stmt.deinit();
         self.insert_installed_stmt.deinit();
         self.insert_file_stmt.deinit();
+        self.query_sync_stmt.deinit();
+        self.query_installed_stmt.deinit();
+        self.hash_stmt.deinit();
     }
 };
 
@@ -55,6 +89,7 @@ const DbError = error{
     RelativePathInMTREE,
     CorruptDatabase,
     InvalidDatabase,
+    TargetNotFound,
 };
 
 const Db = @This();
@@ -93,6 +128,7 @@ pub fn init(
         \\  name TEXT NOT NULL,
         \\  repo TEXT NOT NULL,
         \\  version TEXT NOT NULL,
+        \\  desc_hash BLOB,
         \\  metadata JSONB,
         \\  UNIQUE(name,repo)
         \\);
@@ -137,19 +173,6 @@ pub fn querySync(
     name: []const u8,
     repo: ?[]const u8,
 ) ![]Pkg {
-    var stmt = try self.db.prepareDynamic(
-        \\SELECT json(metadata) FROM sync
-        \\WHERE (
-        \\  (name LIKE ? OR name = ?)
-        \\  OR EXISTS (
-        \\      SELECT 1 FROM json_each(sync.metadata, '$.provides')
-        \\      WHERE (value LIKE ? OR value = ?)
-        \\      )
-        \\  )
-        \\AND (? is NULL OR repo = ?)
-    );
-    defer stmt.deinit();
-
     var results: std.ArrayList(Pkg) = .empty;
     errdefer {
         for (results.items) |r| r.deinit(self.alloc);
@@ -163,7 +186,7 @@ pub fn querySync(
     );
     defer self.alloc.free(likename);
 
-    var it = try stmt.iterator(
+    var it = try self.config.query_sync_stmt.iterator(
         struct { metadata: []const u8 },
         .{
             likename,
@@ -174,6 +197,7 @@ pub fn querySync(
             repo,
         },
     );
+    defer self.config.query_installed_stmt.reset();
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
@@ -188,6 +212,7 @@ pub fn querySync(
     }
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
+    if (results.items.len == 0) return error.TargetNotFound;
 
     return results.toOwnedSlice(self.alloc);
 }
@@ -197,19 +222,6 @@ pub fn queryInstalled(
     name: []const u8,
     repo: ?[]const u8,
 ) ![]Pkg.Installed {
-    var stmt = try self.db.prepareDynamic(
-        \\SELECT json(metadata) FROM installed
-        \\WHERE (
-        \\  (name LIKE ? OR name = ?)
-        \\  OR EXISTS (
-        \\      SELECT 1 FROM json_each(installed.metadata, '$.provides')
-        \\      WHERE (value LIKE ? OR value = ?)
-        \\      )
-        \\  )
-        \\AND (? is NULL OR repo = ?)
-    );
-    defer stmt.deinit();
-
     var results: std.ArrayList(Pkg.Installed) = .empty;
     errdefer {
         for (results.items) |r| r.deinit(self.alloc);
@@ -223,7 +235,7 @@ pub fn queryInstalled(
     );
     defer self.alloc.free(likename);
 
-    var it = try stmt.iterator(
+    var it = try self.config.query_installed_stmt.iterator(
         struct { metadata: []const u8 },
         .{
             likename,
@@ -234,6 +246,7 @@ pub fn queryInstalled(
             repo,
         },
     );
+    defer self.config.query_installed_stmt.reset();
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
@@ -248,6 +261,7 @@ pub fn queryInstalled(
     }
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
+    if (results.items.len == 0) return error.TargetNotFound;
 
     return results.toOwnedSlice(self.alloc);
 }
@@ -266,6 +280,7 @@ pub fn insertFile(
 
 pub fn insertSync(
     self: *Db,
+    hash: []const u8,
     pkg: Pkg,
 ) !void {
     errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
@@ -278,6 +293,7 @@ pub fn insertSync(
         pkg.name,
         pkg.repo,
         pkg.version,
+        hash,
         writer.written(),
     });
     defer self.config.insert_sync_stmt.reset();
@@ -314,15 +330,6 @@ pub fn sync(
     batch_size: usize,
 ) !void {
     errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
-    var stmt = try self.db.prepare(
-        \\INSERT INTO sync (name, repo, version, metadata)
-        \\VALUES (?, ?, ?, jsonb(?))
-        \\ON CONFLICT(name, repo) DO UPDATE SET
-        \\metadata = excluded.metadata
-        \\WHERE metadata != excluded.metadata
-        ,
-    );
-    defer stmt.deinit();
 
     var in_trans = false;
     var batched: usize = 0;
@@ -361,8 +368,8 @@ pub fn sync(
     try reader.openFd(file.handle);
     var buf: [8192]u8 = undefined;
     while (try reader.nextEntry()) |entry| {
-        const pathrepo: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-        const delim = std.mem.lastIndexOfScalar(u8, pathrepo, '/');
+        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+        const delim = std.mem.lastIndexOfScalar(u8, path, '/');
 
         if (delim == null) {
             while (true) {
@@ -372,8 +379,7 @@ pub fn sync(
             continue;
         }
 
-        const is_desc = std.mem.eql(u8, pathrepo[delim.? + 1 ..], "desc");
-
+        const is_desc = std.mem.eql(u8, std.fs.path.basename(path), "desc");
         if (!is_desc) continue;
 
         var content: std.ArrayList(u8) = .empty;
@@ -385,26 +391,52 @@ pub fn sync(
             try content.appendSlice(self.alloc, buf[0..bytes]);
         }
 
-        if (is_desc) {
-            if (batched >= batch_size and in_trans) {
-                try self.db.exec("COMMIT", .{}, .{});
-                batched = 0;
-                in_trans = false;
-            }
-            if (!in_trans) {
-                try self.db.exec("BEGIN IMMEDIATE", .{}, .{});
-                in_trans = true;
-            }
+        const ver_rel_delim = std.mem.lastIndexOfScalar(
+            u8,
+            path,
+            '-',
+        ) orelse unreachable;
+        const name_ver = path[0..ver_rel_delim];
+        const name_ver_delim = std.mem.lastIndexOfScalar(
+            u8,
+            name_ver,
+            '-',
+        ) orelse unreachable;
+        const name = name_ver[0..name_ver_delim];
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.Blake3.hash(
+            content.items,
+            &hash,
+            .{},
+        );
+        const pkg_hash = try self.config.hash_stmt.oneAlloc(
+            []u8,
+            self.alloc,
+            .{},
+            .{ name, repo },
+        );
+        defer if (pkg_hash) |h| self.alloc.free(h);
+        self.config.hash_stmt.reset();
+        if (pkg_hash != null and std.mem.eql(u8, &hash, pkg_hash.?)) continue;
 
-            try desc.index(
-                ctx,
-                content.items,
-                repo,
-            );
-            stmt.reset();
-
-            batched += 1;
+        if (batched >= batch_size and in_trans) {
+            try self.db.exec("COMMIT", .{}, .{});
+            batched = 0;
+            in_trans = false;
         }
+        if (!in_trans) {
+            try self.db.exec("BEGIN IMMEDIATE", .{}, .{});
+            in_trans = true;
+        }
+
+        try desc.index(
+            ctx,
+            content.items,
+            repo,
+            &hash,
+        );
+
+        batched += 1;
     }
 
     if (in_trans) {

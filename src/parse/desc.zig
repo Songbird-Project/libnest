@@ -49,6 +49,7 @@ pub fn index(
     ctx: *Context,
     desc: []const u8,
     repo: []const u8,
+    hash: []const u8,
 ) !void {
     const pkg = try parse(
         ctx.alloc,
@@ -57,7 +58,7 @@ pub fn index(
     );
     defer pkg.deinit(ctx.alloc);
 
-    try ctx.db.insertSync(pkg);
+    try ctx.db.insertSync(hash, pkg);
 }
 
 pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !Pkg {
