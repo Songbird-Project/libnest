@@ -89,7 +89,6 @@ const DbError = error{
     RelativePathInMTREE,
     CorruptDatabase,
     InvalidDatabase,
-    TargetNotFound,
 };
 
 const Db = @This();
@@ -175,7 +174,8 @@ pub fn querySync(
 ) ![]Pkg {
     var results: std.ArrayList(Pkg) = .empty;
     errdefer {
-        for (results.items) |r| r.deinit(self.alloc);
+        std.debug.print("{f}\n", .{self.db.getDetailedError()});
+        for (results.items) |res| res.deinit(self.alloc);
         results.deinit(self.alloc);
     }
 
@@ -197,7 +197,7 @@ pub fn querySync(
             repo,
         },
     );
-    defer self.config.query_installed_stmt.reset();
+    defer self.config.query_sync_stmt.reset();
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
@@ -212,7 +212,6 @@ pub fn querySync(
     }
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
-    if (results.items.len == 0) return error.TargetNotFound;
 
     return results.toOwnedSlice(self.alloc);
 }
@@ -261,7 +260,6 @@ pub fn queryInstalled(
     }
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
-    if (results.items.len == 0) return error.TargetNotFound;
 
     return results.toOwnedSlice(self.alloc);
 }
