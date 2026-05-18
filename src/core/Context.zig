@@ -16,28 +16,6 @@ pub const LogLevel = enum(u8) {
     Fatal,
 };
 
-pub const Action = enum(u8) {
-    Install,
-    Uninstall,
-    Upgrade,
-    Resolve,
-    Build,
-    Sync,
-    Download,
-
-    pub fn format(self: Action, writer: *std.io.Writer) !void {
-        try switch (self) {
-            .Install => writer.writeAll("Installing"),
-            .Uninstall => writer.writeAll("Uninstalling"),
-            .Upgrade => writer.writeAll("Upgrade"),
-            .Resolve => writer.writeAll("Resolving"),
-            .Build => writer.writeAll("Building"),
-            .Sync => writer.writeAll("Syncing"),
-            .Download => writer.writeAll("Downloading"),
-        };
-    }
-};
-
 pub const PathConfig = struct {
     root: []const u8 = "/",
     cache: []const u8 = "var/cache/libnest",
@@ -66,7 +44,7 @@ txn: Txn = .{},
 /// Callbacks
 download_cb: ?*const fn ([]const u8, f64, f64, bool) anyerror!void = null,
 select_cb: ?*const fn ([][]const u8, usize) anyerror!isize = null,
-log_cb: ?*const fn (LogLevel, Action, []const u8) anyerror!void = null,
+log_cb: ?*const fn (LogLevel, []const u8) anyerror!void = null,
 
 pub fn init(
     alloc: std.mem.Allocator,
@@ -126,10 +104,9 @@ pub fn deinit(self: *Context) void {
 pub fn log(
     self: *Context,
     level: LogLevel,
-    action: Action,
     detail: []const u8,
 ) !void {
     if (self.log_cb) |cb| {
-        try cb(level, action, detail);
+        try cb(level, detail);
     }
 }
