@@ -60,15 +60,14 @@ pub fn prepareInstall(
 ) ![]PkgInstallInfo {
     try ctx.log(
         .Info,
-        .Download,
-        "package files",
+        "Downloading package files",
     );
 
     var installs: std.ArrayList(PkgInstallInfo) = .empty;
     defer installs.deinit(ctx.alloc);
 
     for (pkgs, 0..) |pkg, idx| {
-        const explicit = if (idx == pkgs.len - 1) false else true;
+        const explicit = if (idx == pkgs.len - 1) true else false;
 
         const dup = dup: {
             for (ctx.txn.installs.items) |item| {
@@ -91,7 +90,7 @@ pub fn prepareInstall(
             ctx.alloc.free(queried);
         }
         const diff_ver = blk: {
-            for (pkgs) |p| {
+            for (queried) |p| {
                 if (std.mem.eql(u8, p.version, pkg.version)) continue else break :blk true;
             }
             break :blk false;
@@ -179,10 +178,15 @@ pub fn install(
     ctx: *Context,
 ) !void {
     for (ctx.txn.installs.items) |info| {
+        const msg = try std.fmt.allocPrint(
+            ctx.alloc,
+            "Installing {s}",
+            .{info.pkg.name},
+        );
+        defer ctx.alloc.free(msg);
         try ctx.log(
             .Info,
-            .Install,
-            info.pkg.name,
+            msg,
         );
 
         var reader = try archive.Reader.init();

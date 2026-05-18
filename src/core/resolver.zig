@@ -36,12 +36,6 @@ pub fn resolvePkg(
         if (std.mem.eql(u8, item.pkg.name, pkg.name)) return &.{};
     }
 
-    try ctx.log(
-        .Info,
-        .Resolve,
-        "depedencies",
-    );
-
     var visited = std.StringHashMap(void).init(ctx.alloc);
     defer {
         var it = visited.keyIterator();
@@ -50,6 +44,7 @@ pub fn resolvePkg(
     }
     var pkgs: std.ArrayList(Pkg) = .empty;
 
+    try visited.put(try ctx.alloc.dupe(u8, pkg.name), {});
     try resolveDeps(
         ctx,
         pkg,
@@ -69,7 +64,6 @@ fn resolveDeps(
 ) !void {
     for (pkg.deps) |d| {
         const dep = Dep.parse(d);
-        if (visited.contains(dep.name)) continue;
 
         var skip = false;
         for (ctx.txn.installs.items) |item| {
@@ -105,10 +99,7 @@ fn resolveDeps(
         } else 0;
         if (selected <= -1) return error.AbortedInstall;
         defer {
-            for (pkgs, 0..) |p, idx| {
-                if (idx == selected) continue;
-                p.deinit(ctx.alloc);
-            }
+            for (pkgs) |p| p.deinit(ctx.alloc);
             ctx.alloc.free(pkgs);
         }
         const p = pkgs[@intCast(selected)];
@@ -126,11 +117,17 @@ fn resolveDeps(
         const cmp = version.cmp(ver, dep.version);
         if (!Dep.checkVer(dep.constraint, cmp)) return error.UnsatisfiedDependency;
 
-        try visited.put(try ctx.alloc.dupe(u8, dep.name), {});
-        try pkg_list.append(ctx.alloc, p);
+        const selected_pkg = try p.clone(ctx.alloc);
+
+        if (visited.contains(selected_pkg.name)) {
+            selected_pkg.deinit(ctx.alloc);
+            continue;
+        }
+        try visited.put(try ctx.alloc.dupe(u8, selected_pkg.name), {});
+        try pkg_list.append(ctx.alloc, selected_pkg);
         try resolveDeps(
             ctx,
-            p,
+            selected_pkg,
             visited,
             pkg_list,
         );
