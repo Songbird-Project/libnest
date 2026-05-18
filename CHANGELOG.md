@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- LMDB-based indexing for packages and files
-- Small `libcurl` bindings
+- SQLite database for tracking packages and files
 - Small `libarchive` bindings
-- Small `lmdb` bindings
-- `desc` and `.PKGINFO` file parser to extract package info
-- BSD-3-Clause license
-- `CHANGELOG.md` for version tracking
+- `desc` and `.PKGINFO` file parsers to extract package info
+- Package dependency resolver
+- Transaction-based actions
+- Add BSD-3-Clause license
+- Add `CHANGELOG.md` for version tracking
 
 [unreleased]: https://codeberg.org/songbird-project/libnest
