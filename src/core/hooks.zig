@@ -3,9 +3,14 @@ const builtin = @import("builtin");
 const ini = @import("ini");
 
 const Txn = @import("Transaction.zig");
+const Context = @import("Context.zig");
 
 const When = enum { Pre, Post };
 const Operator = enum { Install, Upgrade, Remove };
+
+const HookError = error{
+    InvalidHook,
+};
 
 const Trigger = struct {
     ops: []Operator = &.{},
@@ -15,7 +20,7 @@ const Trigger = struct {
 
 pub const Hook = struct {
     name: []const u8,
-    exec: []const u8 = "",
+    exec: ?[]const u8 = null,
     desc: ?[]const u8 = null,
     triggers: []Trigger = &.{},
     deps: ?[][]const u8 = null,
@@ -35,10 +40,12 @@ pub const Hook = struct {
             &reader.interface,
             ";#",
         );
+        defer parser.deinit();
 
         var hook = Hook{
-            .name = path,
+            .name = try alloc.dupe(u8, path),
         };
+        errdefer hook.deinit(alloc);
 
         var trigger: ?Trigger = null;
         var current_header: enum { Trigger, Action } = .Trigger;
@@ -61,12 +68,15 @@ pub const Hook = struct {
                     if (std.mem.eql(u8, header, "Trigger")) {
                         if (trigger != null) {
                             trigger.?.ops = try ops.toOwnedSlice(alloc);
+                            trigger.?.targets = try targets.toOwnedSlice(alloc);
                             ops.clearRetainingCapacity();
+                            targets.clearRetainingCapacity();
+
                             try triggers.append(alloc, trigger.?);
                         }
                         current_header = .Trigger;
                         trigger = .{};
-                    } else if (std.mem.eql(u8, header, "Trigger")) {
+                    } else if (std.mem.eql(u8, header, "Action")) {
                         current_header = .Action;
                     }
                 },
@@ -85,12 +95,12 @@ pub const Hook = struct {
                             else if (std.mem.eql(u8, kv.value, "Remove"))
                                 try ops.append(alloc, .Remove);
                         } else if (std.mem.eql(u8, kv.key, "Target"))
-                            try targets.append(alloc, kv.value);
+                            try targets.append(alloc, try alloc.dupe(u8, kv.value));
                     } else if (current_header == .Action) {
                         if (std.mem.eql(u8, kv.key, "Description"))
                             hook.desc = try alloc.dupe(u8, kv.value)
                         else if (std.mem.eql(u8, kv.key, "Depends"))
-                            try depends.append(alloc, kv.value)
+                            try depends.append(alloc, try alloc.dupe(u8, kv.value))
                         else if (std.mem.eql(u8, kv.key, "Exec"))
                             hook.exec = try alloc.dupe(u8, kv.value)
                         else if (std.mem.eql(u8, kv.key, "When")) {
@@ -112,6 +122,12 @@ pub const Hook = struct {
             }
         }
 
+        if (trigger != null) {
+            trigger.?.ops = try ops.toOwnedSlice(alloc);
+            trigger.?.targets = try targets.toOwnedSlice(alloc);
+            try triggers.append(alloc, trigger.?);
+        }
+
         hook.triggers = try triggers.toOwnedSlice(alloc);
         hook.deps = try depends.toOwnedSlice(alloc);
 
@@ -121,59 +137,161 @@ pub const Hook = struct {
     pub fn deinit(self: *Hook, alloc: std.mem.Allocator) void {
         for (self.triggers) |trigger| {
             for (trigger.targets) |target| alloc.free(target);
+            alloc.free(trigger.targets);
             alloc.free(trigger.ops);
         }
 
-        if (self.deps) |deps| for (deps) |dep| alloc.free(dep);
+        if (self.exec) |exec| alloc.free(exec);
         if (self.desc) |desc| alloc.free(desc);
+        if (self.deps) |deps| {
+            for (deps) |dep| alloc.free(dep);
+            alloc.free(deps);
+        }
 
         alloc.free(self.name);
-        alloc.free(self.exec);
+        alloc.free(self.triggers);
     }
 
     pub fn tryRun(
         self: *Hook,
         alloc: std.mem.Allocator,
-        txn: Txn,
+        ctx: *Context,
     ) !void {
-        var run: bool = false;
-
+        var run = false;
         for (self.triggers) |trigger| {
-            for (trigger.ops) |op| {
-                for (trigger.targets) |target| {
-                    switch (trigger.type) {
-                        .Pkg => {
-                            if (op == .Install) for (txn.installs.items) |info| {
-                                if (std.mem.eql(
-                                    u8,
-                                    info.pkg.name,
-                                    target,
-                                )) run = true;
-                            };
-                        },
-                        .Path => {
-                            if (op == .Install) for (txn.installs.items) |info| {
-                                if (std.mem.indexOf(
-                                    u8,
-                                    info.files,
-                                    target,
-                                )) run = true;
-                            };
-                        },
-                    }
-                }
-            }
+            if (try triggerable(trigger, ctx)) run = true;
         }
+        if (!run) return;
 
         var child = std.process.Child.init(&.{
-            self.exec,
+            "sh",
+            "-c",
+            self.exec orelse return error.InvalidHook,
         }, alloc);
 
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = if (builtin.is_test) .Ignore else .Inherit;
         child.stderr_behavior = if (builtin.is_test) .Ignore else .Inherit;
 
-        _ = try child.spawnAndWait();
+        const term = try child.spawnAndWait();
+
+        switch (term) {
+            .Exited => |code| {
+                switch (code) {
+                    0 => {},
+                    else => {
+                        if (self.abort_on_fail) std.process.exit(15);
+                    },
+                }
+            },
+            else => return error.ProcessTerminatedUnexpectedly,
+        }
+    }
+
+    fn triggerable(trigger: Trigger, ctx: *Context) !bool {
+        for (trigger.ops) |op| {
+            switch (op) {
+                .Install => {
+                    for (ctx.txn.installs.items) |info| {
+                        switch (trigger.type) {
+                            .Pkg => {
+                                for (trigger.targets) |target| {
+                                    if (std.mem.eql(u8, info.pkg.name, target))
+                                        return true;
+                                }
+                            },
+                            .Path => {
+                                for (trigger.targets) |target| {
+                                    for (info.files) |file| {
+                                        if (std.mem.eql(
+                                            u8,
+                                            file,
+                                            target,
+                                        )) return true;
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+                .Upgrade => {
+                    for (ctx.txn.upgrades.items) |pkg| {
+                        switch (trigger.type) {
+                            .Pkg => {
+                                for (trigger.targets) |target| {
+                                    if (std.mem.eql(u8, pkg.name, target))
+                                        return true;
+                                }
+                            },
+                            .Path => {
+                                const pkgid = try ctx.db.config.pkgid_query.one(
+                                    u8,
+                                    .{},
+                                    .{ pkg.name, pkg.repo },
+                                ) orelse return error.CorruptDatabase;
+                                var it = try ctx.db.config.query_file.iterator(
+                                    []const u8,
+                                    .{pkgid},
+                                );
+
+                                for (trigger.targets) |target| {
+                                    while (try it.nextAlloc(
+                                        ctx.alloc,
+                                        .{},
+                                    )) |path| {
+                                        defer ctx.alloc.free(path);
+                                        if (std.mem.eql(
+                                            u8,
+                                            path,
+                                            target,
+                                        )) return true;
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+                .Remove => {
+                    for (ctx.txn.removes.items) |pkg| {
+                        switch (trigger.type) {
+                            .Pkg => {
+                                for (trigger.targets) |target| {
+                                    if (std.mem.eql(u8, pkg, target))
+                                        return true;
+                                }
+                            },
+                            .Path => {
+                                const pkgid = try ctx.db.config.pkgid_query.one(
+                                    u8,
+                                    .{},
+                                    .{ pkg, null },
+                                ) orelse return error.CorruptDatabase;
+                                var it = try ctx.db.config.query_file.iterator(
+                                    []const u8,
+                                    .{pkgid},
+                                );
+
+                                for (trigger.targets) |target| {
+                                    while (try it.nextAlloc(
+                                        ctx.alloc,
+                                        .{},
+                                    )) |path| {
+                                        defer ctx.alloc.free(path);
+                                        if (std.mem.eql(
+                                            u8,
+                                            path,
+                                            target,
+                                        )) return true;
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            }
+        }
+
+        return false;
     }
 };
 
@@ -191,8 +309,14 @@ pub fn initAll(alloc: std.mem.Allocator, hook_path: []const u8) ![]*Hook {
         if (entry.kind == .file and
             std.mem.endsWith(u8, entry.name, ".hook"))
         {
-            var hook = try Hook.init(alloc, entry.name);
-            try hooks.append(alloc, &hook);
+            const path = try std.fs.path.join(alloc, &.{
+                hook_path,
+                entry.name,
+            });
+            defer alloc.free(path);
+            const hook = try alloc.create(Hook);
+            hook.* = try Hook.init(alloc, path);
+            try hooks.append(alloc, hook);
         }
     }
 
@@ -200,14 +324,17 @@ pub fn initAll(alloc: std.mem.Allocator, hook_path: []const u8) ![]*Hook {
 }
 
 pub fn deinitAll(alloc: std.mem.Allocator, hooks: []*Hook) void {
-    for (hooks) |hook| hook.deinit(alloc);
+    for (hooks) |hook| {
+        hook.deinit(alloc);
+        alloc.destroy(hook);
+    }
+    alloc.free(hooks);
 }
 
 pub fn tryRunAll(
     alloc: std.mem.Allocator,
-    txn: Txn,
-    hooks: []*Hook,
+    ctx: *Context,
     when: When,
 ) !void {
-    for (hooks) |hook| if (hook.when == when) hook.run(alloc, txn);
+    for (ctx.hooks) |hook| if (hook.when == when) try hook.tryRun(alloc, ctx);
 }
