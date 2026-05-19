@@ -9,12 +9,14 @@ const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
 
 pub const DBConfig = struct {
-    insert_sync_stmt: sqlite.DynamicStatement,
-    insert_installed_stmt: sqlite.DynamicStatement,
-    insert_file_stmt: sqlite.DynamicStatement,
-    query_sync_stmt: sqlite.DynamicStatement,
-    query_installed_stmt: sqlite.DynamicStatement,
-    hash_stmt: sqlite.DynamicStatement,
+    insert_sync: sqlite.DynamicStatement,
+    insert_installed: sqlite.DynamicStatement,
+    insert_file: sqlite.DynamicStatement,
+    query_sync: sqlite.DynamicStatement,
+    query_installed: sqlite.DynamicStatement,
+    query_file: sqlite.DynamicStatement,
+    hash_query: sqlite.DynamicStatement,
+    pkgid_query: sqlite.DynamicStatement,
 
     pub fn init(
         db: *sqlite.Db,
@@ -38,6 +40,9 @@ pub const DBConfig = struct {
         const file_stmt = try db.prepareDynamic(
             \\INSERT INTO files (pkgid, path) VALUES (?, ?)
         );
+        const file_query = try db.prepareDynamic(
+            \\SELECT path FROM files WHERE pkgid = ?
+        );
         const sync_query = try db.prepareDynamic(
             \\SELECT json(metadata) FROM sync
             \\WHERE (
@@ -60,27 +65,33 @@ pub const DBConfig = struct {
             \\  )
             \\AND (? is NULL OR repo = ?)
         );
-        const hash_stmt = try db.prepareDynamic(
+        const hash_query = try db.prepareDynamic(
             \\SELECT desc_hash FROM sync WHERE name = ? AND repo = ?
+        );
+        const pkgid_query = try db.prepareDynamic(
+            \\SELECT id FROM installed WHERE name = ? AND (? is NULL OR repo = ?)
         );
 
         return .{
-            .insert_sync_stmt = sync_stmt,
-            .insert_installed_stmt = installed_stmt,
-            .insert_file_stmt = file_stmt,
-            .query_sync_stmt = sync_query,
-            .query_installed_stmt = installed_query,
-            .hash_stmt = hash_stmt,
+            .insert_sync = sync_stmt,
+            .insert_installed = installed_stmt,
+            .insert_file = file_stmt,
+            .query_sync = sync_query,
+            .query_installed = installed_query,
+            .query_file = file_query,
+            .hash_query = hash_query,
+            .pkgid_query = pkgid_query,
         };
     }
 
     pub fn deinit(self: *DBConfig) void {
-        self.insert_sync_stmt.deinit();
-        self.insert_installed_stmt.deinit();
-        self.insert_file_stmt.deinit();
-        self.query_sync_stmt.deinit();
-        self.query_installed_stmt.deinit();
-        self.hash_stmt.deinit();
+        self.insert_sync.deinit();
+        self.insert_installed.deinit();
+        self.insert_file.deinit();
+        self.query_file.deinit();
+        self.query_sync.deinit();
+        self.query_installed.deinit();
+        self.hash_query.deinit();
     }
 };
 
@@ -186,7 +197,7 @@ pub fn querySync(
     );
     defer self.alloc.free(likename);
 
-    var it = try self.config.query_sync_stmt.iterator(
+    var it = try self.config.query_sync.iterator(
         struct { metadata: []const u8 },
         .{
             likename,
@@ -197,7 +208,7 @@ pub fn querySync(
             repo,
         },
     );
-    defer self.config.query_sync_stmt.reset();
+    defer self.config.query_sync.reset();
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
@@ -234,7 +245,7 @@ pub fn queryInstalled(
     );
     defer self.alloc.free(likename);
 
-    var it = try self.config.query_installed_stmt.iterator(
+    var it = try self.config.query_installed.iterator(
         struct { metadata: []const u8 },
         .{
             likename,
@@ -245,7 +256,7 @@ pub fn queryInstalled(
             repo,
         },
     );
-    defer self.config.query_installed_stmt.reset();
+    defer self.config.query_installed.reset();
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
         const parsed = try std.json.parseFromSlice(
@@ -269,11 +280,11 @@ pub fn insertFile(
     pkgid: i64,
     path: []const u8,
 ) !void {
-    try self.config.insert_file_stmt.exec(.{}, .{
+    try self.config.insert_file.exec(.{}, .{
         pkgid,
         path,
     });
-    defer self.config.insert_file_stmt.reset();
+    defer self.config.insert_file.reset();
 }
 
 pub fn insertSync(
@@ -287,14 +298,14 @@ pub fn insertSync(
     const w = &writer.writer;
     defer writer.deinit();
     try std.json.Stringify.value(pkg, .{}, w);
-    try self.config.insert_sync_stmt.exec(.{}, .{
+    try self.config.insert_sync.exec(.{}, .{
         pkg.name,
         pkg.repo,
         pkg.version,
         hash,
         writer.written(),
     });
-    defer self.config.insert_sync_stmt.reset();
+    defer self.config.insert_sync.reset();
 }
 
 pub fn insertInstalled(
@@ -309,14 +320,14 @@ pub fn insertInstalled(
     defer writer.deinit();
     try std.json.Stringify.value(pkg, .{}, w);
 
-    try self.config.insert_installed_stmt.exec(.{}, .{
+    try self.config.insert_installed.exec(.{}, .{
         pkg.name,
         pkg.repo,
         pkg.version,
         explicit,
         writer.written(),
     });
-    defer self.config.insert_installed_stmt.reset();
+    defer self.config.insert_installed.reset();
 
     return self.db.getLastInsertRowID();
 }
@@ -407,14 +418,14 @@ pub fn sync(
             &hash,
             .{},
         );
-        const pkg_hash = try self.config.hash_stmt.oneAlloc(
+        const pkg_hash = try self.config.hash_query.oneAlloc(
             []u8,
             self.alloc,
             .{},
             .{ name, repo },
         );
         defer if (pkg_hash) |h| self.alloc.free(h);
-        self.config.hash_stmt.reset();
+        self.config.hash_query.reset();
         if (pkg_hash != null and std.mem.eql(u8, &hash, pkg_hash.?)) continue;
 
         if (batched >= batch_size and in_trans) {
