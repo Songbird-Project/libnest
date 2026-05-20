@@ -50,6 +50,7 @@ pub fn init(
     alloc: std.mem.Allocator,
     arch: []const u8,
     paths: PathConfig,
+    mirrors: []const MirrorList.MirrorConfig,
 ) !Context {
     var p = PathConfig{
         .root = try alloc.dupe(u8, paths.root),
@@ -76,8 +77,8 @@ pub fn init(
     var db = try Db.init(alloc, p.config);
     errdefer db.deinit();
 
-    var mirrors = try MirrorList.init(alloc, p.config);
-    errdefer mirrors.deinit();
+    var mirrorlist = try MirrorList.init(alloc, mirrors);
+    errdefer mirrorlist.deinit();
 
     const hooks = try txn_hooks.initAll(alloc, p.hook);
     errdefer txn_hooks.deinitAll(alloc, hooks);
@@ -86,7 +87,7 @@ pub fn init(
         .alloc = alloc,
         .arch = try alloc.dupe(u8, arch),
         .db = db,
-        .mirrors = mirrors,
+        .mirrors = mirrorlist,
         .paths = p,
         .hooks = hooks,
     };
