@@ -19,7 +19,7 @@ fn parseEVR(evr: []const u8) EVR {
         }
     }
 
-    if (evr[s] == ':') {
+    if (s < evr.len and evr[s] == ':') {
         epoch = evr[0..s];
         version = evr[s + 1 ..];
     }

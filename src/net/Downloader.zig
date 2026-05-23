@@ -43,10 +43,17 @@ pub fn init(
     retries: u8,
     download_cb: ?*const fn ([]const u8, f64, f64, bool) anyerror!void,
 ) !Downloader {
-    const client = try alloc.create(curl.Easy);
     const ca_bundle = try alloc.create(std.array_list.Managed(u8));
+    errdefer alloc.destroy(ca_bundle);
+
     ca_bundle.* = try curl.allocCABundle(alloc);
+    errdefer ca_bundle.deinit();
+
+    const client = try alloc.create(curl.Easy);
+    errdefer alloc.destroy(client);
+
     client.* = try curl.Easy.init(.{ .ca_bundle = ca_bundle.* });
+    errdefer client.deinit();
 
     return Downloader{
         .alloc = alloc,
@@ -131,6 +138,7 @@ pub fn download(
         self.partial_size = 0;
         self.downloaded = 0;
         self.finished = false;
+        self.cb_error = null;
 
         const res = try self.attemptDownload(url, dest);
 
@@ -164,10 +172,15 @@ pub fn attemptDownload(
     };
 
     const partial_size = size: {
-        break :size (try (std.fs.cwd().openFile(dest, .{}) catch |err| switch (err) {
+        const f = std.fs.cwd().openFile(
+            dest,
+            .{},
+        ) catch |err| switch (err) {
             error.FileNotFound => break :size 0,
             else => return err,
-        }).stat()).size;
+        };
+        defer f.close();
+        break :size (try f.stat()).size;
     };
 
     const range = try std.fmt.allocPrintSentinel(self.alloc, "Range: bytes={d}-", .{partial_size}, 0);

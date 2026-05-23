@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = @import("../utils/mem.zig");
 
 const Pkg = @import("../core/Package.zig");
 const Context = @import("../core/Context.zig");
@@ -23,10 +24,14 @@ pub fn index(
 }
 
 pub fn parse(alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.Installed {
-    const pkginfo = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024);
+    const pkginfo = try std.fs.cwd().readFileAlloc(
+        alloc,
+        path,
+        1024 * 1024,
+    );
     defer alloc.free(pkginfo);
 
-    var fields = std.StringHashMap([][]const u8).init(alloc);
+    var fields: std.StringHashMap([][]const u8) = .init(alloc);
     defer {
         var it = fields.iterator();
         while (it.next()) |entry| {
@@ -45,22 +50,37 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
         if (std.mem.indexOfScalar(u8, trimmed, '=')) |eql| {
-            const key = std.mem.trim(u8, trimmed[0..eql], " \t\r");
-            const val = std.mem.trim(u8, trimmed[eql + 1 ..], " \t\r");
+            const key = std.mem.trim(
+                u8,
+                trimmed[0..eql],
+                " \t\r",
+            );
+            const val = std.mem.trim(
+                u8,
+                trimmed[eql + 1 ..],
+                " \t\r",
+            );
 
             var parts = std.mem.splitScalar(u8, val, ',');
             while (parts.next()) |p| {
-                try current_values.append(alloc, std.mem.trim(u8, p, " \t\r"));
+                try current_values.append(alloc, std.mem.trim(
+                    u8,
+                    p,
+                    " \t\r",
+                ));
             }
 
             if (fields.getPtr(key)) |existing_values| {
                 const old_slice = existing_values.*;
-                const new_slice = try alloc.alloc([]const u8, old_slice.len + current_values.items.len);
+                const new_slice = try alloc.alloc(
+                    []const u8,
+                    old_slice.len + current_values.items.len,
+                );
 
                 @memcpy(new_slice[0..old_slice.len], old_slice);
                 @memcpy(new_slice[old_slice.len..], current_values.items);
 
-                alloc.free(old_slice); // Free the old slice container
+                alloc.free(old_slice);
                 existing_values.* = new_slice;
                 current_values.clearRetainingCapacity();
             } else {
@@ -78,32 +98,57 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.
         }
     }.f;
 
-    const deepDupe = struct {
-        fn f(a: std.mem.Allocator, slices: [][]const u8) ![][]const u8 {
-            const new_slices = try a.alloc([]const u8, slices.len);
-            for (slices, 0..) |slice, i| {
-                new_slices[i] = try a.dupe(u8, slice);
-            }
-            return new_slices;
-        }
-    }.f;
+    var pkg = Pkg.Installed{};
+    errdefer pkg.deinit(alloc);
 
-    return Pkg.Installed{
-        .name = try alloc.dupe(u8, get(fields, "pkgname")),
-        .repo = try alloc.dupe(u8, repo),
-        .version = try alloc.dupe(u8, get(fields, "pkgver")),
-        .description = try alloc.dupe(u8, get(fields, "pkgdesc")),
-        .url = try alloc.dupe(u8, get(fields, "url")),
-        .arch = try alloc.dupe(u8, get(fields, "arch")),
-        .packager = try alloc.dupe(u8, get(fields, "packager")),
-        .build_date = try std.fmt.parseInt(i64, get(fields, "builddate"), 10),
-        .size = try std.fmt.parseInt(i64, get(fields, "size"), 10),
-        .license = try deepDupe(alloc, fields.get("license") orelse &.{}),
-        .conflicts = try deepDupe(alloc, fields.get("conflicts") orelse &.{}),
-        .provides = try deepDupe(alloc, fields.get("provides") orelse &.{}),
-        .deps = try deepDupe(alloc, fields.get("depend") orelse &.{}),
-        .mkdeps = try deepDupe(alloc, fields.get("makedepend") orelse &.{}),
-        .optdeps = try deepDupe(alloc, fields.get("optdepend") orelse &.{}),
-        .checkdeps = try deepDupe(alloc, fields.get("checkdepend") orelse &.{}),
-    };
+    pkg.name = try alloc.dupe(u8, get(fields, "pkgname"));
+    pkg.repo = try alloc.dupe(u8, repo);
+    pkg.version = try alloc.dupe(u8, get(fields, "pkgver"));
+    pkg.description = try alloc.dupe(u8, get(fields, "pkgdesc"));
+    pkg.url = try alloc.dupe(u8, get(fields, "url"));
+    pkg.arch = try alloc.dupe(u8, get(fields, "arch"));
+    pkg.packager = try alloc.dupe(u8, get(fields, "packager"));
+    pkg.build_date = try std.fmt.parseInt(
+        i64,
+        get(fields, "builddate"),
+        10,
+    );
+    pkg.size = try std.fmt.parseInt(i64, get(fields, "size"), 10);
+    pkg.license = try mem.dupeSlice(
+        []const u8,
+        alloc,
+        fields.get("license") orelse &.{},
+    );
+    pkg.conflicts = try mem.dupeSlice(
+        []const u8,
+        alloc,
+        fields.get("conflicts") orelse &.{},
+    );
+    pkg.provides = try mem.dupeSlice(
+        []const u8,
+        alloc,
+        fields.get("provides") orelse &.{},
+    );
+    pkg.deps = try mem.dupeSlice(
+        []const u8,
+        alloc,
+        fields.get("depend") orelse &.{},
+    );
+    pkg.mkdeps = try mem.dupeSlice(
+        []const u8,
+        alloc,
+        fields.get("makedepend") orelse &.{},
+    );
+    pkg.optdeps = try mem.dupeSlice(
+        []const u8,
+        alloc,
+        fields.get("optdepend") orelse &.{},
+    );
+    pkg.checkdeps = try mem.dupeSlice(
+        []const u8,
+        alloc,
+        fields.get("checkdepend") orelse &.{},
+    );
+
+    return pkg;
 }

@@ -224,11 +224,14 @@ pub const Hook = struct {
                                 }
                             },
                             .Path => {
+                                defer ctx.db.config.pkgid_query.reset();
                                 const pkgid = try ctx.db.config.pkgid_query.one(
                                     u8,
                                     .{},
                                     .{ pkg.name, pkg.repo },
                                 ) orelse return error.CorruptDatabase;
+
+                                defer ctx.db.config.query_file.reset();
                                 var it = try ctx.db.config.query_file.iterator(
                                     []const u8,
                                     .{pkgid},
@@ -261,11 +264,14 @@ pub const Hook = struct {
                                 }
                             },
                             .Path => {
+                                defer ctx.db.config.pkgid_query.reset();
                                 const pkgid = try ctx.db.config.pkgid_query.one(
                                     u8,
                                     .{},
                                     .{ pkg, null },
                                 ) orelse return error.CorruptDatabase;
+
+                                defer ctx.db.config.query_file.reset();
                                 var it = try ctx.db.config.query_file.iterator(
                                     []const u8,
                                     .{pkgid},

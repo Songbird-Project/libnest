@@ -64,7 +64,10 @@ pub fn prepareInstall(
     );
 
     var installs: std.ArrayList(PkgInstallInfo) = .empty;
-    defer installs.deinit(ctx.alloc);
+    errdefer {
+        for (installs.items) |*i| i.deinit(ctx.alloc);
+        installs.deinit(ctx.alloc);
+    }
 
     for (pkgs, 0..) |pkg, idx| {
         const explicit = if (idx == pkgs.len - 1) true else false;
@@ -100,7 +103,10 @@ pub fn prepareInstall(
         }
 
         var file_list: std.ArrayList([]const u8) = .empty;
-        defer file_list.deinit(ctx.alloc);
+        errdefer {
+            for (file_list.items) |f| ctx.alloc.free(f);
+            file_list.deinit(ctx.alloc);
+        }
 
         const cache = try std.fs.path.join(ctx.alloc, &.{
             ctx.paths.cache,
@@ -160,13 +166,22 @@ pub fn prepareInstall(
             }
         }
 
-        const info = PkgInstallInfo{
+        const files = try file_list.toOwnedSlice(ctx.alloc);
+        errdefer {
+            for (files) |f| {
+                ctx.alloc.free(f);
+            }
+            ctx.alloc.free(files);
+        }
+
+        var info = PkgInstallInfo{
             .pkg = try pkg.clone(ctx.alloc),
             .location = try ctx.alloc.dupe(u8, dest),
             .cache = try ctx.alloc.dupe(u8, cache),
-            .files = try file_list.toOwnedSlice(ctx.alloc),
+            .files = files,
             .explicit = explicit,
         };
+        errdefer info.deinit(ctx.alloc);
 
         try installs.append(ctx.alloc, info);
     }

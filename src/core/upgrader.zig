@@ -9,6 +9,11 @@ pub const PkgUpgradeInfo = struct {
     name: []const u8,
     repo: []const u8,
 
+    pub fn deinit(self: *PkgUpgradeInfo, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.repo);
+    }
+
     pub fn clone(self: *PkgUpgradeInfo, alloc: std.mem.Allocator) !PkgUpgradeInfo {
         return .{
             .name = try alloc.dupe(u8, self.name),
@@ -21,21 +26,23 @@ pub fn prepareUpgrade(
     ctx: *Context,
 ) ![]PkgUpgradeInfo {
     var stmt = try ctx.db.db.prepare(
-        \\SELECT 
+        \\SELECT
         \\  installed.name AS name,
-        \\  intalled.repo as repo,
+        \\  installed.repo AS repo,
         \\  installed.version AS installed_ver,
         \\  packages.version AS sync_ver
         \\FROM installed
         \\JOIN packages
         \\  ON packages.name = installed.name
-        \\ AND packages.repo = installed.name
+        \\ AND packages.repo = installed.repo
     );
     defer stmt.deinit();
 
     var results: std.ArrayList(PkgUpgradeInfo) = .empty;
-    for (results.items) |r| r.deinit(ctx.alloc);
-    results.deinit(ctx.alloc);
+    defer {
+        for (results.items) |*r| r.deinit(ctx.alloc);
+        results.deinit(ctx.alloc);
+    }
 
     var it = try stmt.iterator(
         struct {
@@ -54,18 +61,16 @@ pub fn prepareUpgrade(
         defer ctx.alloc.free(row.sync_ver);
 
         const cmp = version.cmp(row.installed_ver, row.sync_ver);
-        const info = PkgUpgradeInfo{
-            .name = row.name,
-            .repo = row.repo,
-        };
-
         switch (cmp) {
             -1 => try results.append(
                 ctx.alloc,
-                try info.clone(ctx.alloc),
+                .{
+                    .name = try ctx.alloc.dupe(u8, row.name),
+                    .repo = try ctx.alloc.dupe(u8, row.repo),
+                },
             ),
             1 => {
-                const detail = try std.fmt.allocPrint(
+                const msg = try std.fmt.allocPrint(
                     ctx.alloc,
                     "Local {s}({s}) is newer than synced {s}({s})",
                     .{
@@ -75,11 +80,10 @@ pub fn prepareUpgrade(
                         row.sync_ver,
                     },
                 );
-                defer ctx.alloc.free(detail);
-                ctx.log(
+                defer ctx.alloc.free(msg);
+                try ctx.log(
                     .Warn,
-                    .Upgrade,
-                    detail,
+                    msg,
                 );
             },
             0, _ => {},
@@ -87,13 +91,24 @@ pub fn prepareUpgrade(
     }
 
     var pkgs: std.ArrayList(Pkg) = .empty;
+    errdefer {
+        for (pkgs.items) |p| p.deinit(ctx.alloc);
+        pkgs.deinit(ctx.alloc);
+    }
 
     for (results.items) |up| {
-        try pkgs.append(ctx.alloc, try ctx.db.queryPkg(
-            .Sync,
+        const sync = try ctx.db.querySync(
             up.name,
             up.repo,
-        )[0]);
+        );
+        defer {
+            for (sync) |p| p.deinit(ctx.alloc);
+            ctx.alloc.free(sync);
+        }
+
+        if (sync.len == 0) return error.FailedToGetTarget;
+        if (sync.len > 1) return error.CorruptedDatabase;
+        try pkgs.append(ctx.alloc, try sync[0].clone(ctx.alloc));
     }
 
     return pkgs.toOwnedSlice(ctx.alloc);

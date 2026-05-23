@@ -43,6 +43,10 @@ pub fn resolvePkg(
         visited.deinit();
     }
     var pkgs: std.ArrayList(Pkg) = .empty;
+    errdefer {
+        for (pkgs.items) |*p| p.deinit(ctx.alloc);
+        pkgs.deinit(ctx.alloc);
+    }
 
     try visited.put(try ctx.alloc.dupe(u8, pkg.name), {});
     try resolveDeps(
@@ -118,12 +122,15 @@ fn resolveDeps(
         if (!Dep.checkVer(dep.constraint, cmp)) return error.UnsatisfiedDependency;
 
         const selected_pkg = try p.clone(ctx.alloc);
+        errdefer selected_pkg.deinit(ctx.alloc);
 
         if (visited.contains(selected_pkg.name)) {
             selected_pkg.deinit(ctx.alloc);
             continue;
         }
-        try visited.put(try ctx.alloc.dupe(u8, selected_pkg.name), {});
+        const key = try ctx.alloc.dupe(u8, selected_pkg.name);
+        errdefer ctx.alloc.free(key);
+        try visited.put(key, {});
         try pkg_list.append(ctx.alloc, selected_pkg);
         try resolveDeps(
             ctx,

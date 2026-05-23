@@ -86,6 +86,10 @@ pub fn getDeps(alloc: std.mem.Allocator, path: []const u8, arch: []const u8) ![]
 
     var lines = std.mem.splitScalar(u8, stdout.items, '\n');
     var deps: std.ArrayList(Dep) = .empty;
+    errdefer {
+        for (deps.items) |dep| dep.deinit(alloc);
+        deps.deinit(alloc);
+    }
 
     while (lines.next()) |line| {
         if (line.len == 0) continue;

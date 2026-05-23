@@ -92,6 +92,7 @@ pub const DBConfig = struct {
         self.query_sync.deinit();
         self.query_installed.deinit();
         self.hash_query.deinit();
+        self.pkgid_query.deinit();
     }
 };
 
@@ -211,6 +212,7 @@ pub fn querySync(
     defer self.config.query_sync.reset();
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
+        defer self.alloc.free(row.metadata);
         const parsed = try std.json.parseFromSlice(
             Pkg,
             self.alloc,
@@ -219,7 +221,6 @@ pub fn querySync(
         );
         defer parsed.deinit();
         try results.append(self.alloc, try parsed.value.clone(self.alloc));
-        self.alloc.free(row.metadata);
     }
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
@@ -259,6 +260,7 @@ pub fn queryInstalled(
     defer self.config.query_installed.reset();
 
     while (try it.nextAlloc(self.alloc, .{})) |row| {
+        defer self.alloc.free(row.metadata);
         const parsed = try std.json.parseFromSlice(
             Pkg.Installed,
             self.alloc,
@@ -267,7 +269,6 @@ pub fn queryInstalled(
         );
         defer parsed.deinit();
         try results.append(self.alloc, try parsed.value.clone(self.alloc));
-        self.alloc.free(row.metadata);
     }
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
@@ -280,11 +281,11 @@ pub fn insertFile(
     pkgid: i64,
     path: []const u8,
 ) !void {
+    self.config.insert_file.reset();
     try self.config.insert_file.exec(.{}, .{
         pkgid,
         path,
     });
-    defer self.config.insert_file.reset();
 }
 
 pub fn insertSync(
@@ -294,6 +295,7 @@ pub fn insertSync(
 ) !void {
     errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
 
+    self.config.insert_sync.reset();
     var writer = std.io.Writer.Allocating.init(self.alloc);
     const w = &writer.writer;
     defer writer.deinit();
@@ -305,7 +307,6 @@ pub fn insertSync(
         hash,
         writer.written(),
     });
-    defer self.config.insert_sync.reset();
 }
 
 pub fn insertInstalled(
@@ -315,6 +316,7 @@ pub fn insertInstalled(
 ) !i64 {
     errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
 
+    self.config.insert_installed.reset();
     var writer = std.io.Writer.Allocating.init(self.alloc);
     const w = &writer.writer;
     defer writer.deinit();
@@ -327,7 +329,6 @@ pub fn insertInstalled(
         explicit,
         writer.written(),
     });
-    defer self.config.insert_installed.reset();
 
     return self.db.getLastInsertRowID();
 }

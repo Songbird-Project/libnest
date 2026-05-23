@@ -17,6 +17,8 @@ pub fn update(
     upgrades: []Pkg,
     removes: []const []const u8,
 ) !void {
+    errdefer self.deinit(alloc);
+
     for (installs) |*install| try self.installs.append(
         alloc,
         try install.clone(alloc),

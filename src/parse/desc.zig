@@ -95,13 +95,21 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !Pkg {
     var lines = std.mem.splitScalar(u8, src, '\n');
 
     errdefer {
+        for (licenses.items) |i| alloc.free(i);
         licenses.deinit(alloc);
+        for (replaces.items) |i| alloc.free(i);
         replaces.deinit(alloc);
+        for (conflicts.items) |i| alloc.free(i);
         conflicts.deinit(alloc);
+        for (provides.items) |i| alloc.free(i);
         provides.deinit(alloc);
+        for (deps.items) |i| alloc.free(i);
         deps.deinit(alloc);
+        for (mkdeps.items) |i| alloc.free(i);
         mkdeps.deinit(alloc);
+        for (optdeps.items) |i| alloc.free(i);
         optdeps.deinit(alloc);
+        for (checkdeps.items) |i| alloc.free(i);
         checkdeps.deinit(alloc);
 
         pkg.deinit(alloc);

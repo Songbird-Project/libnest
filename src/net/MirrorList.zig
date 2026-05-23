@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = @import("../utils/mem.zig");
 
 const Downloader = @import("Downloader.zig");
 const Db = @import("../core/Database.zig");
@@ -6,7 +7,10 @@ const Pkg = @import("../core/Package.zig");
 const Context = @import("../core/Context.zig");
 
 const MirrorError = error{
+    CorruptDownload,
     RepoNotFound,
+    FailedToDownloadPackage,
+    FailedToDownloadDb,
 };
 
 pub const MirrorConfig = struct {
@@ -21,6 +25,15 @@ mirrors: std.StringHashMap([][]const u8),
 
 pub fn init(alloc: std.mem.Allocator, mirrors: []const MirrorConfig) !MirrorList {
     var mirrorlist = std.StringHashMap([][]const u8).init(alloc);
+    errdefer {
+        var it = mirrorlist.iterator();
+        while (it.next()) |entry| {
+            alloc.free(entry.key_ptr.*);
+            mem.freeSlice(alloc, entry.value_ptr.*);
+            alloc.free(entry.value_ptr.*);
+        }
+        mirrorlist.deinit();
+    }
 
     for (mirrors) |mirror| {
         const mirror_file = try std.fs.cwd().readFileAlloc(
@@ -31,7 +44,10 @@ pub fn init(alloc: std.mem.Allocator, mirrors: []const MirrorConfig) !MirrorList
         defer alloc.free(mirror_file);
 
         var parsed: std.ArrayList([]const u8) = .empty;
-        defer parsed.deinit(alloc);
+        defer {
+            for (parsed.items) |v| alloc.free(v);
+            parsed.deinit(alloc);
+        }
 
         var lines = std.mem.splitScalar(u8, mirror_file, '\n');
         while (lines.next()) |raw_line| {
@@ -60,15 +76,19 @@ pub fn init(alloc: std.mem.Allocator, mirrors: []const MirrorConfig) !MirrorList
             alloc.free(owned);
         }
         for (mirror.repos) |repo| {
-            const repo_mirrors = try alloc.alloc([]const u8, owned.len);
+            var repo_mirrors: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (repo_mirrors.items) |r| alloc.free(r);
+                repo_mirrors.deinit(alloc);
+            }
 
-            for (owned, 0..) |m, i| {
-                repo_mirrors[i] = try alloc.dupe(u8, m);
+            for (owned) |m| {
+                try repo_mirrors.append(alloc, try alloc.dupe(u8, m));
             }
 
             try mirrorlist.put(
                 try alloc.dupe(u8, repo),
-                repo_mirrors,
+                try repo_mirrors.toOwnedSlice(alloc),
             );
         }
     }
@@ -109,6 +129,8 @@ pub fn downloadPkg(
     const mirrors = self.mirrors.get(pkg.repo);
     if (mirrors == null) return error.RepoNotFound;
     if (mirrors.?.len == 0) return error.NoMirrorsForRepo;
+
+    var downloaded = false;
     for (mirrors.?) |mirror| {
         const url = try self.fmtMirrorURL(
             mirror,
@@ -119,8 +141,11 @@ pub fn downloadPkg(
         defer self.alloc.free(url);
 
         dl.download(url, dest, pkg.name) catch continue;
+        downloaded = true;
         break;
     }
+
+    if (!downloaded) return error.FailedToDownloadPackage;
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [8192]u8 = undefined;
@@ -140,7 +165,7 @@ pub fn downloadPkg(
     var pkg_hash: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&pkg_hash, pkg.checksum);
 
-    if (!std.mem.eql(u8, &pkg_hash, &hash)) return error.CourrptDownload;
+    if (!std.mem.eql(u8, &pkg_hash, &hash)) return error.CorruptDownload;
 }
 
 pub fn downloadDb(
@@ -156,21 +181,24 @@ pub fn downloadDb(
     );
     defer dl.deinit();
 
-    var it = self.mirrors.valueIterator();
-    while (it.next()) |mirrors| {
-        if (mirrors.*.len == 0) return error.NoMirrorsForRepo;
-        for (mirrors.*) |mirror| {
-            const url = try self.fmtDbURL(
-                mirror,
-                name,
-                ctx.arch,
-            );
-            defer self.alloc.free(url);
+    var downloaded = false;
+    const mirrors = self.mirrors.get(name);
 
-            dl.download(url, dest, name) catch continue;
-            break;
-        }
+    if (mirrors == null or mirrors.?.len == 0) return error.NoMirrorsForRepo;
+    for (mirrors.?) |mirror| {
+        const url = try self.fmtDbURL(
+            mirror,
+            name,
+            ctx.arch,
+        );
+        defer self.alloc.free(url);
+
+        dl.download(url, dest, name) catch continue;
+        downloaded = true;
+        break;
     }
+
+    if (!downloaded) return error.FailedToDownloadPackage;
 }
 
 pub fn fmtMirrorURL(
