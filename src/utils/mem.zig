@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn dupeSlice(comptime T: type, alloc: std.mem.Allocator, slices: []const T) ![]T {
     comptime {
         const t = @typeInfo(T);
-        if (t != .pointer or t.pointer.size != .Slice) {
+        if (t != .pointer or t.pointer.size != .slice) {
             @compileError("`T` must be a slice type, found " ++ @typeName(T));
         }
     }
