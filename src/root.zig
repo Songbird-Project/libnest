@@ -32,6 +32,7 @@ pub const Internal = struct {
 
     pub const git = @import("utils/git.zig");
     pub const archive = @import("utils/archive.zig");
+    pub const mem = @import("utils/mem.zig");
 };
 
 pub const libnest_version = std.SemanticVersion{
