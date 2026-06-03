@@ -6,28 +6,6 @@ const Dep = @import("Dependency.zig");
 const Context = @import("Context.zig");
 const Pkg = @import("Package.zig");
 
-pub fn installWithDeps(
-    ctx: *Context,
-    pkg: Pkg,
-) !void {
-    const pkgs = try resolvePkg(ctx, pkg);
-    defer {
-        for (pkgs) |p| {
-            p.deinit(ctx.alloc);
-        }
-        ctx.alloc.free(pkgs);
-    }
-
-    const infos = try installer.prepareInstall(ctx, pkgs);
-    try ctx.txn.update(
-        ctx.alloc,
-        infos,
-        &.{},
-        &.{},
-    );
-    try installer.install(ctx);
-}
-
 pub fn resolvePkg(
     ctx: *Context,
     pkg: Pkg,

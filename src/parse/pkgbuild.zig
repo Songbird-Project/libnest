@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Context = @import("../core/Context.zig");
+
 pub const Dep = struct {
     name: []const u8 = "Invalid",
     type: enum {
@@ -14,7 +16,7 @@ pub const Dep = struct {
     }
 };
 
-pub fn getDeps(alloc: std.mem.Allocator, path: []const u8, arch: []const u8) ![]Dep {
+pub fn getDeps(ctx: *Context, path: []const u8, arch: []const u8) ![]Dep {
     const script =
         \\merge_arch_deps() {
         \\  local supported_attrs=(depends optdepends makedepends checkdepends)
@@ -46,54 +48,41 @@ pub fn getDeps(alloc: std.mem.Allocator, path: []const u8, arch: []const u8) ![]
         \\done
     ;
 
-    var env: std.process.EnvMap = .init(alloc);
+    const env = std.process.Environ.Map.init(ctx.alloc);
     defer env.deinit();
     try env.put("PKGBUILD", path);
     try env.put("CARCH", arch);
 
-    var bash = std.process.Child.init(
-        &.{
+    const bash = try std.process.run(ctx.alloc, ctx.io, .{
+        .argv = &.{
             "bash",
             "-c",
             script,
         },
-        alloc,
-    );
-    bash.env_map = &env;
-    bash.stdout_behavior = .Pipe;
-    bash.stderr_behavior = .Pipe;
+        .environ_map = &env,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer ctx.alloc.free(bash.stdout);
+    defer ctx.alloc.free(bash.stderr);
 
-    try bash.spawn();
-
-    var stdout: std.ArrayList(u8) = .empty;
-    defer stdout.deinit(alloc);
-    var stderr: std.ArrayList(u8) = .empty;
-    defer stderr.deinit(alloc);
-    try bash.collectOutput(
-        alloc,
-        &stdout,
-        &stderr,
-        8192,
-    );
-
-    const status = try bash.wait();
-    switch (status) {
-        .Exited => |code| {
+    switch (bash.term) {
+        .exited => |code| {
             if (code != 0) return error.DepResolutionFailed;
         },
         else => return error.DepResolutionFailed,
     }
 
-    var lines = std.mem.splitScalar(u8, stdout.items, '\n');
+    var lines = std.mem.splitScalar(u8, bash.stdout, '\n');
     var deps: std.ArrayList(Dep) = .empty;
     errdefer {
-        for (deps.items) |dep| dep.deinit(alloc);
-        deps.deinit(alloc);
+        for (deps.items) |dep| dep.deinit(ctx.alloc);
+        deps.deinit(ctx.alloc);
     }
 
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        if (std.mem.indexOfScalar(u8, line, ':')) |idx| {
+        if (std.mem.findScalar(u8, line, ':')) |idx| {
             var dep = Dep{};
 
             if (std.mem.eql(u8, line[0..idx], "i"))
@@ -107,11 +96,11 @@ pub fn getDeps(alloc: std.mem.Allocator, path: []const u8, arch: []const u8) ![]
             else
                 continue;
 
-            dep.name = try alloc.dupe(u8, line[idx + 1 ..]);
+            dep.name = try ctx.alloc.dupe(u8, line[idx + 1 ..]);
 
-            try deps.append(alloc, dep);
+            try deps.append(ctx.alloc, dep);
         }
     }
 
-    return deps.toOwnedSlice(alloc);
+    return deps.toOwnedSlice(ctx.alloc);
 }

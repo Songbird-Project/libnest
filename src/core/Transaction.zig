@@ -7,6 +7,7 @@ const Pkg = @import("Package.zig");
 installs: std.ArrayList(installer.PkgInstallInfo) = .empty,
 upgrades: std.ArrayList(Pkg) = .empty,
 removes: std.ArrayList([]const u8) = .empty,
+files: std.ArrayList([]const u8) = .empty,
 
 const Txn = @This();
 
@@ -35,12 +36,25 @@ pub fn update(
     );
 }
 
+pub fn updateFiles(
+    self: *Txn,
+    alloc: std.mem.Allocator,
+    files: []const []const u8,
+) !void {
+    for (files) |f| try self.files.append(
+        alloc,
+        try alloc.dupe(u8, f),
+    );
+}
+
 pub fn deinit(self: *Txn, alloc: std.mem.Allocator) void {
     for (self.installs.items) |*item| item.deinit(alloc);
     for (self.upgrades.items) |item| item.deinit(alloc);
     for (self.removes.items) |item| alloc.free(item);
+    for (self.files.items) |item| alloc.free(item);
 
     self.installs.deinit(alloc);
     self.upgrades.deinit(alloc);
     self.removes.deinit(alloc);
+    self.files.deinit(alloc);
 }

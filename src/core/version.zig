@@ -24,7 +24,7 @@ fn parseEVR(evr: []const u8) EVR {
         version = evr[s + 1 ..];
     }
 
-    if (std.mem.lastIndexOfScalar(u8, version, '-')) |se| {
+    if (std.mem.findScalarLast(u8, version, '-')) |se| {
         release = version[se + 1 ..];
         version = version[0..se];
     }
@@ -98,7 +98,9 @@ fn rpmvercmp(a: []const u8, b: []const u8) i8 {
 
     if (i >= a.len and j >= b.len) return 0;
 
-    if ((i >= a.len and !(j < b.len and std.ascii.isAlphabetic(b[j]))) or (i < a.len and std.ascii.isAlphabetic(a[i]))) {
+    if ((i >= a.len and !(j < b.len and std.ascii.isAlphabetic(b[j]))) or
+        (i < a.len and std.ascii.isAlphabetic(a[i])))
+    {
         return -1;
     } else {
         return 1;

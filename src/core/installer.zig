@@ -10,37 +10,18 @@ pub const PkgInstallInfo = struct {
     pkg: Pkg,
     location: []const u8,
     cache: []const u8,
-    files: [][]const u8,
     explicit: bool,
 
     pub fn clone(self: *PkgInstallInfo, alloc: std.mem.Allocator) !PkgInstallInfo {
-        var files = try alloc.alloc([]const u8, self.files.len);
-        errdefer {
-            for (files) |file| {
-                alloc.free(file);
-            }
-            alloc.free(files);
-        }
-
-        for (self.files, 0..) |file, idx| {
-            files[idx] = try alloc.dupe(u8, file);
-        }
-
         return .{
             .pkg = try self.pkg.clone(alloc),
             .location = try alloc.dupe(u8, self.location),
             .cache = try alloc.dupe(u8, self.cache),
-            .files = files,
             .explicit = self.explicit,
         };
     }
 
     pub fn deinit(self: *PkgInstallInfo, alloc: std.mem.Allocator) void {
-        for (self.files) |file| {
-            alloc.free(file);
-        }
-
-        alloc.free(self.files);
         alloc.free(self.location);
         alloc.free(self.cache);
 
@@ -58,11 +39,6 @@ pub fn prepareInstall(
     ctx: *Context,
     pkgs: []Pkg,
 ) ![]PkgInstallInfo {
-    try ctx.log(
-        .Info,
-        "Downloading package files",
-    );
-
     var installs: std.ArrayList(PkgInstallInfo) = .empty;
     errdefer {
         for (installs.items) |*i| i.deinit(ctx.alloc);
@@ -94,7 +70,11 @@ pub fn prepareInstall(
         }
         const diff_ver = blk: {
             for (queried) |p| {
-                if (std.mem.eql(u8, p.version, pkg.version)) continue else break :blk true;
+                if (std.mem.eql(
+                    u8,
+                    p.version,
+                    pkg.version,
+                )) continue else break :blk true;
             }
             break :blk false;
         };
@@ -102,28 +82,33 @@ pub fn prepareInstall(
             return error.AlreadyInstalled;
         }
 
-        var file_list: std.ArrayList([]const u8) = .empty;
-        errdefer {
-            for (file_list.items) |f| ctx.alloc.free(f);
-            file_list.deinit(ctx.alloc);
+        var files: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (files.items) |f| ctx.alloc.free(f);
+            files.deinit(ctx.alloc);
         }
 
-        const cache = try std.fs.path.join(ctx.alloc, &.{
+        const cache = try std.Io.Dir.path.join(ctx.alloc, &.{
             ctx.paths.cache,
             "pkg",
-            if (std.mem.indexOf(u8, pkg.filename, ".pkg.tar.")) |i|
+            if (std.mem.find(u8, pkg.filename, ".pkg.tar.")) |i|
                 pkg.filename[0..i]
             else
                 pkg.checksum,
         });
         defer ctx.alloc.free(cache);
-        try std.fs.cwd().makePath(cache);
+        try std.Io.Dir.cwd().createDirPath(ctx.io, cache);
 
-        const dest = try std.fs.path.join(ctx.alloc, &.{
+        const dest = try std.Io.Dir.path.join(ctx.alloc, &.{
             cache,
             pkg.filename,
         });
         defer ctx.alloc.free(dest);
+
+        try ctx.log(
+            .Info,
+            "Downloading package files...",
+        );
 
         try ctx.mirrors.downloadPkg(
             ctx,
@@ -131,11 +116,12 @@ pub fn prepareInstall(
             dest,
         );
 
-        const file = try std.fs.cwd().openFile(
+        const file = try std.Io.Dir.cwd().openFile(
+            ctx.io,
             dest,
             .{ .mode = .read_only },
         );
-        defer file.close();
+        defer file.close(ctx.io);
 
         var reader = try archive.Reader.init();
         defer reader.deinit();
@@ -149,36 +135,31 @@ pub fn prepareInstall(
             if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
             if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-            const basename = std.fs.path.basename(rel);
+            const basename = std.Io.Dir.path.basename(rel);
             if (basename.len > 0 and basename[0] == '.') continue;
 
-            const install_path = try std.fs.path.join(ctx.alloc, &.{
+            const install_path = try std.Io.Dir.path.join(ctx.alloc, &.{
                 ctx.paths.root,
                 rel,
             });
             defer ctx.alloc.free(install_path);
 
             if (path_type == archive.c.S_IFREG or path_type == archive.c.S_IFLNK) {
-                try file_list.append(
+                try files.append(
                     ctx.alloc,
                     try ctx.alloc.dupe(u8, install_path),
                 );
             }
         }
 
-        const files = try file_list.toOwnedSlice(ctx.alloc);
-        errdefer {
-            for (files) |f| {
-                ctx.alloc.free(f);
-            }
-            ctx.alloc.free(files);
-        }
+        if (try conflicts(ctx, pkg.name, files.items)) return error.Conflict;
+
+        try ctx.txn.updateFiles(ctx.alloc, files.items);
 
         var info = PkgInstallInfo{
             .pkg = try pkg.clone(ctx.alloc),
             .location = try ctx.alloc.dupe(u8, dest),
             .cache = try ctx.alloc.dupe(u8, cache),
-            .files = files,
             .explicit = explicit,
         };
         errdefer info.deinit(ctx.alloc);
@@ -210,11 +191,12 @@ pub fn install(
         var writer = try archive.Writer.init();
         defer writer.deinit();
 
-        const file = try std.fs.cwd().openFile(
+        const file = try std.Io.Dir.cwd().openFile(
+            ctx.io,
             info.location,
             .{ .mode = .read_only },
         );
-        defer file.close();
+        defer file.close(ctx.io);
 
         try reader.openFd(file.handle);
         var buf: [8192]u8 = undefined;
@@ -226,19 +208,23 @@ pub fn install(
             if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
             if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-            const basename = std.fs.path.basename(rel);
+            const basename = std.Io.Dir.path.basename(rel);
             const install_path = if (basename.len > 0 and basename[0] == '.')
-                try std.fs.path.join(ctx.alloc, &.{
+                try std.Io.Dir.path.join(ctx.alloc, &.{
                     info.cache,
                     rel,
                 })
-            else if (std.mem.startsWith(u8, path, "/usr/share/libalpm/hooks/"))
-                try std.fs.path.join(ctx.alloc, &.{
+            else if (std.mem.startsWith(
+                u8,
+                path,
+                "/usr/share/libalpm/hooks/",
+            ))
+                try std.Io.Dir.path.join(ctx.alloc, &.{
                     ctx.paths.hook,
                     rel[25..],
                 })
             else
-                try std.fs.path.join(ctx.alloc, &.{
+                try std.Io.Dir.path.join(ctx.alloc, &.{
                     ctx.paths.root,
                     rel,
                 });
@@ -263,7 +249,7 @@ pub fn install(
             try writer.finishEntry();
         }
 
-        const pkginfo_path = try std.fs.path.join(ctx.alloc, &.{
+        const pkginfo_path = try std.Io.Dir.path.join(ctx.alloc, &.{
             info.cache,
             ".PKGINFO",
         });
@@ -275,39 +261,38 @@ pub fn install(
             info.explicit,
         );
 
-        const mtree_path = try std.fs.path.join(ctx.alloc, &.{
+        const mtree_path = try std.Io.Dir.path.join(ctx.alloc, &.{
             info.cache,
             ".MTREE",
         });
         defer ctx.alloc.free(mtree_path);
         try useMTREE(
             ctx,
+            pkgid,
             info.cache,
             mtree_path,
         );
-
-        for (info.files) |installed| {
-            try ctx.db.insertFile(pkgid, installed);
-        }
     }
 }
 
 pub fn useMTREE(
     ctx: *Context,
+    pkgid: i64,
     cache: []const u8,
     mtree_path: []const u8,
 ) !void {
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
-    const file = std.fs.cwd().openFile(
+    const file = std.Io.Dir.cwd().openFile(
+        ctx.io,
         mtree_path,
         .{ .mode = .read_only },
     ) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer file.close();
+    defer file.close(ctx.io);
 
     var visited = std.StringHashMap(void).init(ctx.alloc);
     defer {
@@ -325,19 +310,19 @@ pub fn useMTREE(
         if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
         if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-        const basename = std.fs.path.basename(rel);
+        const basename = std.Io.Dir.path.basename(rel);
         const install_path = if (basename.len > 0 and basename[0] == '.')
-            try std.fs.path.join(ctx.alloc, &.{
+            try std.Io.Dir.path.join(ctx.alloc, &.{
                 cache,
                 rel,
             })
         else if (std.mem.startsWith(u8, path, "/usr/share/libalpm/hooks/"))
-            try std.fs.path.join(ctx.alloc, &.{
+            try std.Io.Dir.path.join(ctx.alloc, &.{
                 ctx.paths.hook,
                 rel[25..],
             })
         else
-            try std.fs.path.join(ctx.alloc, &.{
+            try std.Io.Dir.path.join(ctx.alloc, &.{
                 ctx.paths.root,
                 rel,
             });
@@ -349,16 +334,22 @@ pub fn useMTREE(
                     const target: []const u8 = std.mem.span(lnk);
 
                     var target_rel = target;
-                    if (std.mem.startsWith(u8, target, "./")) target_rel = target_rel[2..];
-                    if (std.mem.startsWith(u8, target, "/")) target_rel = target_rel[1..];
+                    if (std.mem.startsWith(u8, target, "./"))
+                        target_rel = target_rel[2..];
+                    if (std.mem.startsWith(u8, target, "/"))
+                        target_rel = target_rel[1..];
 
-                    const rel_basename = std.fs.path.basename(target_rel);
+                    const rel_basename = std.Io.Dir.path.basename(target_rel);
                     const target_path = if (rel_basename.len > 0 and rel_basename[0] == '.')
-                        try std.fs.path.join(ctx.alloc, &.{
+                        try std.Io.Dir.path.join(ctx.alloc, &.{
                             cache,
                             target_rel,
                         })
-                    else if (std.mem.startsWith(u8, target, "/usr/share/libalpm/hooks/"))
+                    else if (std.mem.startsWith(
+                        u8,
+                        target,
+                        "/usr/share/libalpm/hooks/",
+                    ))
                         try std.fs.path.join(ctx.alloc, &.{
                             ctx.paths.hook,
                             target_rel[25..],
@@ -372,24 +363,24 @@ pub fn useMTREE(
                     break :hash target_path;
                 } else break :hash install_path;
             };
-            defer if (!std.mem.eql(u8, hash_path, install_path)) ctx.alloc.free(hash_path);
+            defer if (!std.mem.eql(
+                u8,
+                hash_path,
+                install_path,
+            )) ctx.alloc.free(hash_path);
             if (visited.contains(path)) continue;
             try visited.put(try ctx.alloc.dupe(u8, path), {});
 
+            const hash_file = try std.Io.Dir.cwd().readFileAlloc(
+                ctx.io,
+                hash_path,
+                ctx.alloc,
+                .unlimited,
+            );
+            defer ctx.alloc.free(hash_file);
+
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-            var buf: [8192]u8 = undefined;
-
-            const f = try std.fs.cwd().openFile(hash_path, .{
-                .mode = .read_only,
-            });
-            defer f.close();
-
-            while (true) {
-                const bytes = try f.read(&buf);
-                if (bytes == 0) break;
-                hasher.update(buf[0..bytes]);
-            }
-
+            hasher.update(hash_file);
             var hash: [32]u8 = undefined;
             hasher.final(&hash);
 
@@ -401,43 +392,39 @@ pub fn useMTREE(
         } else if (path_type == archive.c.S_IFLNK) {
             const expect: []const u8 = std.mem.span(archive.c.archive_entry_symlink(entry));
 
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
-            const on_disk = try std.fs.cwd().readLink(install_path, &buf);
+            const bytes = try std.Io.Dir.cwd().readLink(
+                ctx.io,
+                install_path,
+                &buf,
+            );
 
-            if (!std.mem.eql(u8, expect, on_disk)) return error.CorruptDownload;
+            if (!std.mem.eql(u8, expect, buf[0..bytes])) return error.CorruptDownload;
         }
+
+        try ctx.db.conn.exec(
+            "INSERT INTO files (pkgid, path) VALUES (?1, ?2)",
+            .{ pkgid, path },
+        );
     }
 }
 
-pub fn uninstall(
-    ctx: *Context,
-) !void {
-    for (ctx.txn.removes.items) |name| {
-        const pkgid = try ctx.db.db.oneAlloc(
-            i64,
-            ctx.alloc,
-            "SELECT id FROM installed WHERE name = ?",
-            .{},
-            .{name},
-        );
+pub fn conflicts(ctx: *Context, name: []const u8, files: []const []const u8) !bool {
+    const row = try ctx.db.conn.row(
+        \\SELECT * FROM installed, json_each(installed.metadata, '$.conflicts')
+        \\WHERE value = ?1
+    , .{name});
+    defer if (row) |r| r.deinit();
+    if (row != null) return true;
 
-        if (pkgid == null) return error.FailedToGetTarget;
-
-        var stmt = try ctx.db.db.prepare("SELECT path FROM files WHERE pkgid = ?");
-        defer stmt.deinit();
-
-        var iter = try stmt.iterator([]const u8, .{pkgid.?});
-        while (try iter.nextAlloc(ctx.alloc, .{})) |path| {
-            defer ctx.alloc.free(path);
-            std.fs.cwd().deleteFile(path) catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => return err,
-            };
-        }
-
-        try ctx.db.db.exec(
-            \\DELETE FROM installed WHERE id = ?
-        , .{}, .{pkgid.?});
+    for (files) |file| {
+        const file_row = try ctx.db.conn.row(
+            \\SELECT * FROM files WHERE path=?1
+        , .{file});
+        defer if (file_row) |r| r.deinit();
+        if (file_row != null) return true;
     }
+
+    return false;
 }

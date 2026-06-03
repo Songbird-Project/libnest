@@ -28,13 +28,13 @@ pub const Hook = struct {
     abort_on_fail: bool = false,
     needs_targets: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator, path: []const u8) !Hook {
-        const f = try std.fs.cwd().openFile(path, .{
+    pub fn init(io: std.Io, alloc: std.mem.Allocator, path: []const u8) !Hook {
+        const f = try std.Io.Dir.cwd().openFile(io, path, .{
             .mode = .read_only,
         });
-        defer f.close();
+        defer f.close(io);
         var buf: [4096]u8 = undefined;
-        var reader = f.reader(&buf);
+        var reader = f.reader(io, &buf);
         var parser = ini.parse(
             alloc,
             &reader.interface,
@@ -154,7 +154,6 @@ pub const Hook = struct {
 
     pub fn tryRun(
         self: *Hook,
-        alloc: std.mem.Allocator,
         ctx: *Context,
     ) !void {
         var run = false;
@@ -163,20 +162,18 @@ pub const Hook = struct {
         }
         if (!run) return;
 
-        var child = std.process.Child.init(&.{
-            "sh",
-            "-c",
-            self.exec orelse return error.InvalidHook,
-        }, alloc);
+        var proc = try std.process.spawn(ctx.io, .{
+            .argv = &.{
+                "sh",
+                "-c",
+                self.exec orelse return error.InvalidHook,
+            },
+        });
 
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = if (builtin.is_test) .Ignore else .Inherit;
-        child.stderr_behavior = if (builtin.is_test) .Ignore else .Inherit;
-
-        const term = try child.spawnAndWait();
+        const term = try proc.wait(ctx.io);
 
         switch (term) {
-            .Exited => |code| {
+            .exited => |code| {
                 switch (code) {
                     0 => {},
                     else => {
@@ -202,7 +199,7 @@ pub const Hook = struct {
                             },
                             .Path => {
                                 for (trigger.targets) |target| {
-                                    for (info.files) |file| {
+                                    for (ctx.txn.files.items) |file| {
                                         if (std.mem.eql(
                                             u8,
                                             file,
@@ -224,25 +221,8 @@ pub const Hook = struct {
                                 }
                             },
                             .Path => {
-                                defer ctx.db.config.pkgid_query.reset();
-                                const pkgid = try ctx.db.config.pkgid_query.one(
-                                    u8,
-                                    .{},
-                                    .{ pkg.name, pkg.repo },
-                                ) orelse return error.CorruptDatabase;
-
-                                defer ctx.db.config.query_file.reset();
-                                var it = try ctx.db.config.query_file.iterator(
-                                    []const u8,
-                                    .{pkgid},
-                                );
-
                                 for (trigger.targets) |target| {
-                                    while (try it.nextAlloc(
-                                        ctx.alloc,
-                                        .{},
-                                    )) |path| {
-                                        defer ctx.alloc.free(path);
+                                    for (ctx.txn.files.items) |path| {
                                         if (std.mem.eql(
                                             u8,
                                             path,
@@ -264,25 +244,8 @@ pub const Hook = struct {
                                 }
                             },
                             .Path => {
-                                defer ctx.db.config.pkgid_query.reset();
-                                const pkgid = try ctx.db.config.pkgid_query.one(
-                                    u8,
-                                    .{},
-                                    .{ pkg, null },
-                                ) orelse return error.CorruptDatabase;
-
-                                defer ctx.db.config.query_file.reset();
-                                var it = try ctx.db.config.query_file.iterator(
-                                    []const u8,
-                                    .{pkgid},
-                                );
-
                                 for (trigger.targets) |target| {
-                                    while (try it.nextAlloc(
-                                        ctx.alloc,
-                                        .{},
-                                    )) |path| {
-                                        defer ctx.alloc.free(path);
+                                    for (ctx.txn.files.items) |path| {
                                         if (std.mem.eql(
                                             u8,
                                             path,
@@ -301,27 +264,27 @@ pub const Hook = struct {
     }
 };
 
-pub fn initAll(alloc: std.mem.Allocator, hook_path: []const u8) ![]*Hook {
-    var hook_dir = try std.fs.cwd().openDir(hook_path, .{
+pub fn initAll(io: std.Io, alloc: std.mem.Allocator, hook_path: []const u8) ![]*Hook {
+    var hook_dir = try std.Io.Dir.cwd().openDir(io, hook_path, .{
         .access_sub_paths = true,
         .iterate = true,
     });
-    defer hook_dir.close();
+    defer hook_dir.close(io);
     var it = hook_dir.iterate();
 
     var hooks: std.ArrayList(*Hook) = .empty;
 
-    while (try it.nextLinux()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind == .file and
             std.mem.endsWith(u8, entry.name, ".hook"))
         {
-            const path = try std.fs.path.join(alloc, &.{
+            const path = try std.Io.Dir.path.join(alloc, &.{
                 hook_path,
                 entry.name,
             });
             defer alloc.free(path);
             const hook = try alloc.create(Hook);
-            hook.* = try Hook.init(alloc, path);
+            hook.* = try Hook.init(io, alloc, path);
             try hooks.append(alloc, hook);
         }
     }
@@ -338,9 +301,8 @@ pub fn deinitAll(alloc: std.mem.Allocator, hooks: []*Hook) void {
 }
 
 pub fn tryRunAll(
-    alloc: std.mem.Allocator,
     ctx: *Context,
     when: When,
 ) !void {
-    for (ctx.hooks) |hook| if (hook.when == when) try hook.tryRun(alloc, ctx);
+    for (ctx.hooks) |hook| if (hook.when == when) try hook.tryRun(ctx);
 }

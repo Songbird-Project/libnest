@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const version = @import("core/version.zig");
 pub const installer = @import("core/installer.zig");
+pub const remover = @import("core/remover.zig");
 pub const upgrader = @import("core/upgrader.zig");
 pub const resolver = @import("core/resolver.zig");
 pub const hooks = @import("core/hooks.zig");

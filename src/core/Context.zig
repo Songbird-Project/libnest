@@ -32,6 +32,7 @@ pub const PathConfig = struct {
 
 const Context = @This();
 
+io: std.Io,
 alloc: std.mem.Allocator,
 arch: []const u8,
 
@@ -44,9 +45,10 @@ txn: Txn = .{},
 /// Callbacks
 download_cb: ?*const fn ([]const u8, f64, f64, bool) anyerror!void = null,
 select_cb: ?*const fn ([][]const u8, usize) anyerror!isize = null,
-log_cb: ?*const fn (LogLevel, []const u8) anyerror!void = null,
+log_cb: ?*const fn (std.Io, LogLevel, []const u8) anyerror!void = null,
 
 pub fn init(
+    io: std.Io,
     alloc: std.mem.Allocator,
     arch: []const u8,
     paths: PathConfig,
@@ -54,36 +56,37 @@ pub fn init(
 ) !Context {
     var p = PathConfig{
         .root = try alloc.dupe(u8, paths.root),
-        .cache = try std.fs.path.join(alloc, &.{
+        .cache = try std.Io.Dir.path.join(alloc, &.{
             paths.root,
             paths.cache,
         }),
-        .config = try std.fs.path.join(alloc, &.{
+        .config = try std.Io.Dir.path.join(alloc, &.{
             paths.root,
             paths.config,
         }),
-        .hook = try std.fs.path.join(alloc, &.{
+        .hook = try std.Io.Dir.path.join(alloc, &.{
             paths.root,
             paths.hook,
         }),
     };
     errdefer p.deinit(alloc);
 
-    try std.fs.cwd().makePath(p.root);
-    try std.fs.cwd().makePath(p.cache);
-    try std.fs.cwd().makePath(p.config);
-    try std.fs.cwd().makePath(p.hook);
+    try std.Io.Dir.cwd().createDirPath(io, p.root);
+    try std.Io.Dir.cwd().createDirPath(io, p.cache);
+    try std.Io.Dir.cwd().createDirPath(io, p.config);
+    try std.Io.Dir.cwd().createDirPath(io, p.hook);
 
     var db = try Db.init(alloc, p.config);
     errdefer db.deinit();
 
-    var mirrorlist = try MirrorList.init(alloc, mirrors);
+    var mirrorlist = try MirrorList.init(io, alloc, mirrors);
     errdefer mirrorlist.deinit();
 
-    const hooks = try txn_hooks.initAll(alloc, p.hook);
+    const hooks = try txn_hooks.initAll(io, alloc, p.hook);
     errdefer txn_hooks.deinitAll(alloc, hooks);
 
     return .{
+        .io = io,
         .alloc = alloc,
         .arch = try alloc.dupe(u8, arch),
         .db = db,
@@ -108,6 +111,6 @@ pub fn log(
     detail: []const u8,
 ) !void {
     if (self.log_cb) |cb| {
-        try cb(level, detail);
+        try cb(self.io, level, detail);
     }
 }

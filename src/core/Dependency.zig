@@ -22,23 +22,23 @@ pub fn parse(
     var version: ?[]const u8 = null;
     var constraint: Constraint = .none;
 
-    if (std.mem.indexOf(u8, dep, ">=")) |idx| {
+    if (std.mem.find(u8, dep, ">=")) |idx| {
         constraint = .gte;
         name = dep[0..idx];
         version = dep[idx + 2 ..];
-    } else if (std.mem.indexOf(u8, dep, "<=")) |idx| {
+    } else if (std.mem.find(u8, dep, "<=")) |idx| {
         constraint = .lte;
         name = dep[0..idx];
         version = dep[idx + 2 ..];
-    } else if (std.mem.indexOfScalar(u8, dep, '>')) |idx| {
+    } else if (std.mem.findScalarLast(u8, dep, '>')) |idx| {
         constraint = .gt;
         name = dep[0..idx];
         version = dep[idx + 1 ..];
-    } else if (std.mem.indexOfScalar(u8, dep, '<')) |idx| {
+    } else if (std.mem.findScalarLast(u8, dep, '<')) |idx| {
         constraint = .lt;
         name = dep[0..idx];
         version = dep[idx + 1 ..];
-    } else if (std.mem.indexOfScalar(u8, dep, '=')) |idx| {
+    } else if (std.mem.findScalarLast(u8, dep, '=')) |idx| {
         constraint = .eql;
         name = dep[0..idx];
         version = dep[idx + 1 ..];

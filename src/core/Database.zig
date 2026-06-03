@@ -1,5 +1,5 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
+const zqlite = @import("zqlite");
 
 const Context = @import("../core/Context.zig");
 const Downloader = @import("../net/Downloader.zig");
@@ -7,94 +7,6 @@ const Pkg = @import("Package.zig");
 
 const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
-
-pub const DBConfig = struct {
-    insert_sync: sqlite.DynamicStatement,
-    insert_installed: sqlite.DynamicStatement,
-    insert_file: sqlite.DynamicStatement,
-    query_sync: sqlite.DynamicStatement,
-    query_installed: sqlite.DynamicStatement,
-    query_file: sqlite.DynamicStatement,
-    hash_query: sqlite.DynamicStatement,
-    pkgid_query: sqlite.DynamicStatement,
-
-    pub fn init(
-        db: *sqlite.Db,
-    ) !DBConfig {
-        errdefer std.debug.print("{f}\n", .{db.getDetailedError()});
-
-        const sync_stmt = try db.prepareDynamic(
-            \\INSERT INTO sync (name, repo, version, desc_hash, metadata)
-            \\VALUES (?, ?, ?, ?, jsonb(?))
-            \\ON CONFLICT(name, repo) DO UPDATE SET
-            \\metadata = excluded.metadata
-            \\WHERE metadata != excluded.metadata
-        );
-        const installed_stmt = try db.prepareDynamic(
-            \\INSERT INTO installed (name, repo, version, explicit, metadata)
-            \\VALUES (?, ?, ?, ?, jsonb(?))
-            \\ON CONFLICT(name, repo) DO UPDATE SET
-            \\metadata = excluded.metadata
-            \\WHERE metadata != excluded.metadata
-        );
-        const file_stmt = try db.prepareDynamic(
-            \\INSERT INTO files (pkgid, path) VALUES (?, ?)
-        );
-        const file_query = try db.prepareDynamic(
-            \\SELECT path FROM files WHERE pkgid = ?
-        );
-        const sync_query = try db.prepareDynamic(
-            \\SELECT json(metadata) FROM sync
-            \\WHERE (
-            \\  (name LIKE ? OR name = ?)
-            \\  OR EXISTS (
-            \\      SELECT 1 FROM json_each(sync.metadata, '$.provides')
-            \\      WHERE (value LIKE ? OR value = ?)
-            \\      )
-            \\  )
-            \\AND (? is NULL OR repo = ?)
-        );
-        const installed_query = try db.prepareDynamic(
-            \\SELECT json(metadata) FROM installed
-            \\WHERE (
-            \\  (name LIKE ? OR name = ?)
-            \\  OR EXISTS (
-            \\      SELECT 1 FROM json_each(installed.metadata, '$.provides')
-            \\      WHERE (value LIKE ? OR value = ?)
-            \\      )
-            \\  )
-            \\AND (? is NULL OR repo = ?)
-        );
-        const hash_query = try db.prepareDynamic(
-            \\SELECT desc_hash FROM sync WHERE name = ? AND repo = ?
-        );
-        const pkgid_query = try db.prepareDynamic(
-            \\SELECT id FROM installed WHERE name = ? AND (? is NULL OR repo = ?)
-        );
-
-        return .{
-            .insert_sync = sync_stmt,
-            .insert_installed = installed_stmt,
-            .insert_file = file_stmt,
-            .query_sync = sync_query,
-            .query_installed = installed_query,
-            .query_file = file_query,
-            .hash_query = hash_query,
-            .pkgid_query = pkgid_query,
-        };
-    }
-
-    pub fn deinit(self: *DBConfig) void {
-        self.insert_sync.deinit();
-        self.insert_installed.deinit();
-        self.insert_file.deinit();
-        self.query_file.deinit();
-        self.query_sync.deinit();
-        self.query_installed.deinit();
-        self.hash_query.deinit();
-        self.pkgid_query.deinit();
-    }
-};
 
 const DbError = error{
     RelativePathInPkg,
@@ -106,34 +18,26 @@ const DbError = error{
 const Db = @This();
 
 alloc: std.mem.Allocator,
-db: *sqlite.Db,
-config: *DBConfig,
+conn: zqlite.Conn,
 
 pub fn init(
     alloc: std.mem.Allocator,
     db_path: []const u8,
 ) !Db {
-    const dbpath = try std.fs.path.joinZ(alloc, &.{
+    const dbpath = try std.Io.Dir.path.joinZ(alloc, &.{
         db_path,
         "pkgs.db",
     });
     defer alloc.free(dbpath);
-    const db = try alloc.create(sqlite.Db);
-    db.* = try sqlite.Db.init(.{
-        .mode = .{ .File = dbpath },
-        .open_flags = .{
-            .write = true,
-            .create = true,
-        },
-        .threading_mode = .MultiThread,
-    });
-    errdefer alloc.destroy(db);
+    const flags = zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode;
+    const conn = try zqlite.open(dbpath, flags);
+    errdefer conn.close();
 
-    _ = try db.pragma(void, .{}, "foreign_keys", "ON");
-    _ = try db.pragma(void, .{}, "journal_mode", "WAL");
-    _ = try db.pragma(void, .{}, "cache_size", "-200000");
-
-    try db.execMulti(
+    try conn.execNoArgs(
+        \\PRAGMA foreign_keys=true;
+        \\PRAGMA journal_mode=WAL;
+        \\PRAGMA cache_size=-200000;
+        \\
         \\CREATE TABLE IF NOT EXISTS sync(
         \\  id INTEGER PRIMARY KEY,
         \\  name TEXT NOT NULL,
@@ -159,24 +63,48 @@ pub fn init(
         \\  metadata JSONB,
         \\  UNIQUE(name,repo)
         \\);
-    , .{});
-
-    const config = try alloc.create(DBConfig);
-    config.* = try DBConfig.init(db);
-    errdefer alloc.destroy(config);
+    );
 
     return .{
         .alloc = alloc,
-        .db = db,
-        .config = config,
+        .conn = conn,
     };
 }
 
 pub fn deinit(self: *Db) void {
-    self.config.deinit();
-    self.db.deinit();
-    self.alloc.destroy(self.config);
-    self.alloc.destroy(self.db);
+    self.conn.close();
+}
+
+pub fn queryPkgId(self: *Db, pkg: []const u8) !i64 {
+    const pkgid_row = try self.conn.row(
+        "SELECT id FROM installed WHERE name = ?1 AND (?2 is NULL OR repo = ?2)",
+        .{ pkg, null },
+    );
+    defer if (pkgid_row) |r| r.deinit();
+    if (pkgid_row == null) return error.FailedToGetTarget;
+
+    return pkgid_row.?.int(0);
+}
+
+pub fn queryPaths(self: *Db, pkgid: i64) ![][]const u8 {
+    var files: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (files.items) |f| self.alloc.free(f);
+        files.deinit(self.alloc);
+    }
+
+    var rows = try self.conn.rows(
+        "SELECT path FROM files WHERE pkgid = ?1",
+        .{pkgid},
+    );
+    defer rows.deinit();
+    while (rows.next()) |row| try files.append(
+        self.alloc,
+        try self.alloc.dupe(u8, row.text(0)),
+    );
+    if (rows.err) |err| return err;
+
+    return files.toOwnedSlice(self.alloc);
 }
 
 pub fn querySync(
@@ -186,45 +114,43 @@ pub fn querySync(
 ) ![]Pkg {
     var results: std.ArrayList(Pkg) = .empty;
     errdefer {
-        std.debug.print("{f}\n", .{self.db.getDetailedError()});
-        for (results.items) |res| res.deinit(self.alloc);
+        for (results.items) |r| r.deinit(self.alloc);
         results.deinit(self.alloc);
     }
 
-    const likename = try std.fmt.allocPrint(
-        self.alloc,
-        "{s}=%",
-        .{name},
-    );
-    defer self.alloc.free(likename);
+    var rows = try self.conn.rows(
+        \\SELECT json(metadata) FROM sync
+        \\WHERE (
+        \\  name = ?1
+        \\  OR EXISTS (
+        \\  SELECT * FROM json_each(sync.metadata, '$.provides')
+        \\  WHERE SUBSTR(value, 1,
+        \\      CASE
+        \\          WHEN INSTR(value, '>') > 0 THEN INSTR(value, '>') - 1
+        \\          WHEN INSTR(value, '<') > 0 THEN INSTR(value, '<') - 1
+        \\          WHEN INSTR(value, '=') > 0 THEN INSTR(value, '=') - 1
+        \\          ELSE LENGTH(value)
+        \\      END) = ?1
+        \\      )
+        \\  )
+        \\AND (?2 is NULL OR repo = ?2)
+    , .{ name, repo });
+    defer rows.deinit();
 
-    var it = try self.config.query_sync.iterator(
-        struct { metadata: []const u8 },
-        .{
-            likename,
-            name,
-            likename,
-            name,
-            repo,
-            repo,
-        },
-    );
-    defer self.config.query_sync.reset();
-
-    while (try it.nextAlloc(self.alloc, .{})) |row| {
-        defer self.alloc.free(row.metadata);
+    while (rows.next()) |row| {
+        const metadata = row.text(0);
         const parsed = try std.json.parseFromSlice(
             Pkg,
             self.alloc,
-            row.metadata,
+            metadata,
             .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
         );
         defer parsed.deinit();
         try results.append(self.alloc, try parsed.value.clone(self.alloc));
     }
+    if (rows.err) |err| return err;
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
-
     return results.toOwnedSlice(self.alloc);
 }
 
@@ -239,53 +165,40 @@ pub fn queryInstalled(
         results.deinit(self.alloc);
     }
 
-    const likename = try std.fmt.allocPrint(
-        self.alloc,
-        "{s}=%",
-        .{name},
-    );
-    defer self.alloc.free(likename);
+    var rows = try self.conn.rows(
+        \\SELECT json(metadata) FROM installed
+        \\WHERE (
+        \\  name = ?1
+        \\  OR EXISTS (
+        \\  SELECT * FROM json_each(installed.metadata, '$.provides')
+        \\  WHERE SUBSTR(value, 1,
+        \\      CASE
+        \\          WHEN INSTR(value, '>') > 0 THEN INSTR(value, '>') - 1
+        \\          WHEN INSTR(value, '<') > 0 THEN INSTR(value, '<') - 1
+        \\          WHEN INSTR(value, '=') > 0 THEN INSTR(value, '=') - 1
+        \\          ELSE LENGTH(value)
+        \\      END) = ?1
+        \\      )
+        \\  )
+        \\AND (?2 is NULL OR repo = ?2)
+    , .{ name, repo });
+    defer rows.deinit();
 
-    var it = try self.config.query_installed.iterator(
-        struct { metadata: []const u8 },
-        .{
-            likename,
-            name,
-            likename,
-            name,
-            repo,
-            repo,
-        },
-    );
-    defer self.config.query_installed.reset();
-
-    while (try it.nextAlloc(self.alloc, .{})) |row| {
-        defer self.alloc.free(row.metadata);
+    while (rows.next()) |row| {
+        const metadata = row.text(0);
         const parsed = try std.json.parseFromSlice(
             Pkg.Installed,
             self.alloc,
-            row.metadata,
+            metadata,
             .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
         );
         defer parsed.deinit();
         try results.append(self.alloc, try parsed.value.clone(self.alloc));
     }
+    if (rows.err) |err| return err;
 
     if (repo != null and results.items.len > 1) return error.InvalidDatabase;
-
     return results.toOwnedSlice(self.alloc);
-}
-
-pub fn insertFile(
-    self: *Db,
-    pkgid: i64,
-    path: []const u8,
-) !void {
-    self.config.insert_file.reset();
-    try self.config.insert_file.exec(.{}, .{
-        pkgid,
-        path,
-    });
 }
 
 pub fn insertSync(
@@ -293,20 +206,18 @@ pub fn insertSync(
     hash: []const u8,
     pkg: Pkg,
 ) !void {
-    errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
-
-    self.config.insert_sync.reset();
-    var writer = std.io.Writer.Allocating.init(self.alloc);
+    var writer = std.Io.Writer.Allocating.init(self.alloc);
     const w = &writer.writer;
     defer writer.deinit();
     try std.json.Stringify.value(pkg, .{}, w);
-    try self.config.insert_sync.exec(.{}, .{
-        pkg.name,
-        pkg.repo,
-        pkg.version,
-        hash,
-        writer.written(),
-    });
+
+    try self.conn.exec(
+        \\INSERT INTO sync (name, repo, version, desc_hash, metadata)
+        \\VALUES (?1, ?2, ?3, ?4, jsonb(?5))
+        \\ON CONFLICT(name, repo) DO UPDATE SET
+        \\metadata = excluded.metadata
+        \\WHERE metadata != excluded.metadata
+    , .{ pkg.name, pkg.repo, pkg.version, hash, writer.written() });
 }
 
 pub fn insertInstalled(
@@ -314,23 +225,20 @@ pub fn insertInstalled(
     explicit: bool,
     pkg: Pkg.Installed,
 ) !i64 {
-    errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
-
-    self.config.insert_installed.reset();
-    var writer = std.io.Writer.Allocating.init(self.alloc);
+    var writer = std.Io.Writer.Allocating.init(self.alloc);
     const w = &writer.writer;
     defer writer.deinit();
     try std.json.Stringify.value(pkg, .{}, w);
 
-    try self.config.insert_installed.exec(.{}, .{
-        pkg.name,
-        pkg.repo,
-        pkg.version,
-        explicit,
-        writer.written(),
-    });
+    try self.conn.exec(
+        \\INSERT INTO installed (name, repo, version, explicit, metadata)
+        \\VALUES (?1, ?2, ?3, ?4, jsonb(?5))
+        \\ON CONFLICT(name, repo) DO UPDATE SET
+        \\metadata = excluded.metadata
+        \\WHERE metadata != excluded.metadata
+    , .{ pkg.name, pkg.repo, pkg.version, explicit, writer.written() });
 
-    return self.db.getLastInsertRowID();
+    return self.conn.lastInsertedRowId();
 }
 
 pub fn sync(
@@ -339,8 +247,6 @@ pub fn sync(
     repo: []const u8,
     batch_size: usize,
 ) !void {
-    errdefer std.debug.print("{f}\n", .{self.db.getDetailedError()});
-
     var in_trans = false;
     var batched: usize = 0;
 
@@ -353,13 +259,13 @@ pub fn sync(
         .{repo},
     );
     defer self.alloc.free(repodb);
-    const dest = try std.fs.path.join(self.alloc, &.{
+    const dest = try std.Io.Dir.path.join(self.alloc, &.{
         ctx.paths.cache,
         repodb,
     });
     defer self.alloc.free(dest);
 
-    std.fs.cwd().deleteFile(dest) catch |err| switch (err) {
+    std.Io.Dir.cwd().deleteFile(ctx.io, dest) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -369,17 +275,20 @@ pub fn sync(
         dest,
     );
 
-    const file = try std.fs.cwd().openFile(
+    const file = try std.Io.Dir.cwd().openFile(
+        ctx.io,
         dest,
         .{ .mode = .read_only },
     );
-    defer file.close();
+    defer file.close(ctx.io);
 
     try reader.openFd(file.handle);
     var buf: [8192]u8 = undefined;
     while (try reader.nextEntry()) |entry| {
+        errdefer self.conn.rollback();
+
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-        const delim = std.mem.lastIndexOfScalar(u8, path, '/');
+        const delim = std.mem.findScalarLast(u8, path, '/');
 
         if (delim == null) {
             while (true) {
@@ -389,7 +298,7 @@ pub fn sync(
             continue;
         }
 
-        const is_desc = std.mem.eql(u8, std.fs.path.basename(path), "desc");
+        const is_desc = std.mem.eql(u8, std.Io.Dir.path.basename(path), "desc");
         if (!is_desc) continue;
 
         var content: std.ArrayList(u8) = .empty;
@@ -401,13 +310,13 @@ pub fn sync(
             try content.appendSlice(self.alloc, buf[0..bytes]);
         }
 
-        const ver_rel_delim = std.mem.lastIndexOfScalar(
+        const ver_rel_delim = std.mem.findScalarLast(
             u8,
             path,
             '-',
         ) orelse unreachable;
         const name_ver = path[0..ver_rel_delim];
-        const name_ver_delim = std.mem.lastIndexOfScalar(
+        const name_ver_delim = std.mem.findScalarLast(
             u8,
             name_ver,
             '-',
@@ -419,23 +328,21 @@ pub fn sync(
             &hash,
             .{},
         );
-        const pkg_hash = try self.config.hash_query.oneAlloc(
-            []u8,
-            self.alloc,
-            .{},
+        const hash_row = try self.conn.row(
+            "SELECT desc_hash FROM sync WHERE name=?1 AND repo=?2",
             .{ name, repo },
         );
-        defer if (pkg_hash) |h| self.alloc.free(h);
-        self.config.hash_query.reset();
+        defer if (hash_row) |r| r.deinit();
+        const pkg_hash = if (hash_row) |r| r.blob(0) else null;
         if (pkg_hash != null and std.mem.eql(u8, &hash, pkg_hash.?)) continue;
 
         if (batched >= batch_size and in_trans) {
-            try self.db.exec("COMMIT", .{}, .{});
+            try self.conn.commit();
             batched = 0;
             in_trans = false;
         }
         if (!in_trans) {
-            try self.db.exec("BEGIN IMMEDIATE", .{}, .{});
+            try self.conn.transaction();
             in_trans = true;
         }
 
@@ -450,8 +357,8 @@ pub fn sync(
     }
 
     if (in_trans) {
-        try self.db.exec("COMMIT", .{}, .{});
-        try self.db.exec("VACUUM", .{}, .{});
+        try self.conn.commit();
+        try self.conn.execNoArgs("VACUUM");
         batched = 0;
         in_trans = false;
     }

@@ -1,9 +1,6 @@
 const std = @import("std");
 const installer = @import("../core/installer.zig");
-pub const c = @cImport({
-    @cInclude("archive.h");
-    @cInclude("archive_entry.h");
-});
+pub const c = @import("archive_c");
 
 const Context = @import("../core/Context.zig");
 
@@ -66,19 +63,19 @@ pub const Writer = struct {
             if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
             if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
 
-            const basename = std.fs.path.basename(rel);
+            const basename = std.Io.Dir.path.basename(rel);
             const target_path = if (basename.len > 0 and basename[0] == '.')
-                try std.fs.path.join(ctx.alloc, &.{
+                try std.Io.Dir.path.join(ctx.alloc, &.{
                     info.cache,
                     rel,
                 })
             else if (std.mem.startsWith(u8, path, "/usr/share/libalpm/hooks/"))
-                try std.fs.path.join(ctx.alloc, &.{
+                try std.Io.Dir.path.join(ctx.alloc, &.{
                     ctx.paths.hook,
                     rel[25..],
                 })
             else
-                try std.fs.path.join(ctx.alloc, &.{
+                try std.Io.Dir.path.join(ctx.alloc, &.{
                     ctx.paths.root,
                     rel,
                 });
@@ -138,7 +135,7 @@ pub const Reader = struct {
         _ = c.archive_read_free(self.archive);
     }
 
-    pub fn openFd(self: *Reader, fd: std.posix.fd_t) !void {
+    pub fn openFd(self: *Reader, fd: std.Io.File.Handle) !void {
         if (c.archive_read_open_fd(self.archive, fd, 8192) != c.ARCHIVE_OK)
             return error.OpenFailed;
     }
@@ -161,7 +158,14 @@ pub const Reader = struct {
             buf.len,
         );
 
-        if (bytes < 0) return error.ReadFailed;
+        if (bytes < 0) {
+            std.debug.print("archive_read_data returned: {d}, error: {s}\n", .{
+                bytes,
+                std.mem.span(c.archive_error_string(self.archive)),
+            });
+            if (bytes == c.ARCHIVE_EOF) return 0;
+            return error.ReadFailed;
+        }
         return @intCast(bytes);
     }
 };

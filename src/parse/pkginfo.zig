@@ -11,6 +11,7 @@ pub fn index(
     explicit: bool,
 ) !i64 {
     const pkg = try parse(
+        ctx.io,
         ctx.alloc,
         repo,
         path,
@@ -23,11 +24,12 @@ pub fn index(
     );
 }
 
-pub fn parse(alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.Installed {
-    const pkginfo = try std.fs.cwd().readFileAlloc(
-        alloc,
+pub fn parse(io: std.Io, alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.Installed {
+    const pkginfo = try std.Io.Dir.cwd().readFileAlloc(
+        io,
         path,
-        1024 * 1024,
+        alloc,
+        .unlimited,
     );
     defer alloc.free(pkginfo);
 
@@ -49,7 +51,7 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, path: []const u8) !Pkg.
         const trimmed = std.mem.trim(u8, line, " \r\t");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
-        if (std.mem.indexOfScalar(u8, trimmed, '=')) |eql| {
+        if (std.mem.findScalar(u8, trimmed, '=')) |eql| {
             const key = std.mem.trim(
                 u8,
                 trimmed[0..eql],

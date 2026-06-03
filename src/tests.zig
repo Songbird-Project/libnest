@@ -15,64 +15,6 @@ const PREFIX: []const u8 = "./tests";
 const MIRRORS: []const u8 = "./tests/mirrors";
 const ARCH: []const u8 = "x86_64";
 
-fn installWithDeps(
-    alloc: std.mem.Allocator,
-    db: *Db,
-    mirrors: *MirrorList,
-    pkg: Pkg,
-    installed: *std.StringHashMap(void),
-    prefix: ?[]const u8,
-    download_cb: ?*const Downloader.callback,
-) !void {
-    for (pkg.deps) |d| {
-        const dep = Dep.parse(d);
-        if (installed.contains(dep.name)) continue;
-
-        const pkgs = try db.queryPkg(Pkg, dep.name);
-        defer {
-            for (pkgs) |p| {
-                p.deinit();
-            }
-            db.alloc.free(pkgs);
-        }
-        const p = pkgs[0].value;
-
-        var ver: ?[]const u8 = p.version;
-        if (!std.mem.eql(u8, dep.name, p.name)) {
-            for (p.provides) |provided| {
-                const prov = Dep.parse(provided);
-                if (std.mem.eql(u8, dep.name, prov.name)) {
-                    ver = prov.version;
-                }
-            }
-        }
-
-        const cmp = version.cmp(ver, dep.version);
-        if (!Dep.checkVer(dep.constraint, cmp)) return error.UnsatisfiedDependency;
-
-        try installed.put(try alloc.dupe(u8, dep.name), {});
-        try installWithDeps(
-            alloc,
-            db,
-            mirrors,
-            p,
-            installed,
-            prefix,
-            download_cb,
-        );
-    }
-
-    db.install(
-        mirrors,
-        pkg,
-        prefix,
-        download_cb,
-    ) catch |err| switch (err) {
-        error.AlreadyInstalled => {},
-        else => return err,
-    };
-}
-
 fn cb(dlnow: f64, dltotal: f64) !void {
     const bar_width: usize = 10;
     const filled: u8 = if (dltotal == 0)
@@ -126,16 +68,21 @@ test "AUR Build" {
     );
     defer b.deinit();
 
+    var mirrors = try MirrorList.init(alloc, MIRRORS);
+    defer mirrors.deinit();
+
     var db = try Db.init(
         alloc,
         "/home/dds/Desktop/Projects/Zig/nest/tests",
-        "x86_64",
+        ARCH,
     );
     defer db.deinit();
+    db.download_cb = &cb;
 
     for (res.results) |result| {
         if (std.mem.eql(u8, result.Name, "trashy")) try b.build(
             &db,
+            &mirrors,
             "/home/dds/Desktop/Projects/Zig/nest/tests",
             result,
             true,
@@ -156,6 +103,7 @@ test "Sync Databases" {
         ARCH,
     );
     defer db.deinit();
+    db.download_cb = &cb;
 
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
@@ -166,7 +114,6 @@ test "Sync Databases" {
             PREFIX,
             repo,
             50_000,
-            &cb,
         );
     }
 }
@@ -182,6 +129,7 @@ test "Package Install" {
         ARCH,
     );
     defer db.deinit();
+    db.download_cb = &cb;
 
     var mirrors = try MirrorList.init(alloc, MIRRORS);
     defer mirrors.deinit();
@@ -210,13 +158,10 @@ test "Package Install" {
         installed.deinit();
     }
 
-    try installWithDeps(
-        alloc,
-        &db,
+    try db.installWithDeps(
         &mirrors,
         pkg,
         &installed,
         PREFIX,
-        &cb,
     );
 }

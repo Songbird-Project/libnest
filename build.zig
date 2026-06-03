@@ -32,25 +32,51 @@ pub fn build(b: *std.Build) void {
     };
     _ = dep_opts;
 
+    const archive_c = b.addTranslateC(.{
+        .root_source_file = b.path("lib/archive.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    archive_c.linkSystemLibrary("archive", .{});
+
+    const git2_c = b.addTranslateC(.{
+        .root_source_file = b.path("lib/git.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    git2_c.linkSystemLibrary("git2", .{});
+
     const module = b.addModule("libnest", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{
+            .{
+                .name = "archive_c",
+                .module = archive_c.createModule(),
+            },
+            .{
+                .name = "git2_c",
+                .module = git2_c.createModule(),
+            },
+        },
     });
 
-    module.linkSystemLibrary("archive", .{});
-    module.linkSystemLibrary("git2", .{});
     const curl = b.dependency("curl", .{
         .target = target,
         .optimize = optimize,
+        .link_vendor = false,
     });
     module.addImport("curl", curl.module("curl"));
-    const sqlite = b.dependency("sqlite", .{
+
+    const zqlite = b.dependency("zqlite", .{
         .target = target,
         .optimize = optimize,
     });
-    module.addImport("sqlite", sqlite.module("sqlite"));
+    module.linkSystemLibrary("sqlite3", .{});
+    module.addImport("zqlite", zqlite.module("zqlite"));
+
     const ini = b.dependency("ini", .{
         .target = target,
         .optimize = optimize,
@@ -63,17 +89,25 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/tests.zig"),
                 .target = target,
                 .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{
+                        .name = "archive_c",
+                        .module = archive_c.createModule(),
+                    },
+                    .{
+                        .name = "git2_c",
+                        .module = git2_c.createModule(),
+                    },
+                },
             }),
             .use_llvm = true,
             .filters = test_filters,
         });
 
-        tests.linkSystemLibrary("curl");
-        tests.linkSystemLibrary("archive");
-        tests.linkSystemLibrary("git2");
-        tests.linkLibC();
+        tests.root_module.linkSystemLibrary("curl", .{});
         tests.root_module.addImport("curl", curl.module("curl"));
-        tests.root_module.addImport("sqlite", sqlite.module("sqlite"));
+        tests.root_module.addImport("zqlite", zqlite.module("zqlite"));
 
         const run_tests = b.addRunArtifact(tests);
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-pub const c = @cImport(@cInclude("git2.h"));
+pub const c = @import("git_c");
 
 pub fn init() isize {
     return @as(isize, c.git_libgit2_init());

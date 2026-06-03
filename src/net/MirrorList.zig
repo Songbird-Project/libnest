@@ -23,7 +23,7 @@ const MirrorList = @This();
 alloc: std.mem.Allocator,
 mirrors: std.StringHashMap([][]const u8),
 
-pub fn init(alloc: std.mem.Allocator, mirrors: []const MirrorConfig) !MirrorList {
+pub fn init(io: std.Io, alloc: std.mem.Allocator, mirrors: []const MirrorConfig) !MirrorList {
     var mirrorlist = std.StringHashMap([][]const u8).init(alloc);
     errdefer {
         var it = mirrorlist.iterator();
@@ -36,10 +36,11 @@ pub fn init(alloc: std.mem.Allocator, mirrors: []const MirrorConfig) !MirrorList
     }
 
     for (mirrors) |mirror| {
-        const mirror_file = try std.fs.cwd().readFileAlloc(
-            alloc,
+        const mirror_file = try std.Io.Dir.cwd().readFileAlloc(
+            io,
             mirror.path,
-            1024 * 1024,
+            alloc,
+            .unlimited,
         );
         defer alloc.free(mirror_file);
 
@@ -58,7 +59,7 @@ pub fn init(alloc: std.mem.Allocator, mirrors: []const MirrorConfig) !MirrorList
             );
             if (line.len == 0) continue;
             if (line[0] == '#') continue;
-            if (std.mem.indexOfScalar(u8, line, '=')) |eql| {
+            if (std.mem.findScalar(u8, line, '=')) |eql| {
                 const stripped_line = std.mem.trim(
                     u8,
                     line[eql + 1 ..],
@@ -120,6 +121,7 @@ pub fn downloadPkg(
     dest: []const u8,
 ) !void {
     var dl = try Downloader.init(
+        ctx.io,
         self.alloc,
         3,
         ctx.download_cb,
@@ -140,25 +142,23 @@ pub fn downloadPkg(
         );
         defer self.alloc.free(url);
 
-        dl.download(url, dest, pkg.name) catch continue;
+        dl.download(ctx.io, url, dest, pkg.name) catch continue;
         downloaded = true;
         break;
     }
 
     if (!downloaded) return error.FailedToDownloadPackage;
 
+    const hash_file = try std.Io.Dir.cwd().readFileAlloc(
+        ctx.io,
+        dest,
+        self.alloc,
+        .unlimited,
+    );
+    defer self.alloc.free(hash_file);
+
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var buf: [8192]u8 = undefined;
-
-    const file = try std.fs.cwd().openFile(dest, .{});
-    defer file.close();
-
-    while (true) {
-        const bytes = try file.read(&buf);
-        if (bytes <= 0) break;
-        hasher.update(buf[0..bytes]);
-    }
-
+    hasher.update(hash_file);
     var hash: [32]u8 = undefined;
     hasher.final(&hash);
 
@@ -175,6 +175,7 @@ pub fn downloadDb(
     dest: []const u8,
 ) !void {
     var dl = try Downloader.init(
+        ctx.io,
         self.alloc,
         3,
         ctx.download_cb,
@@ -193,7 +194,7 @@ pub fn downloadDb(
         );
         defer self.alloc.free(url);
 
-        dl.download(url, dest, name) catch continue;
+        dl.download(ctx.io, url, dest, name) catch continue;
         downloaded = true;
         break;
     }

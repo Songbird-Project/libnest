@@ -25,7 +25,7 @@ pub const PkgUpgradeInfo = struct {
 pub fn prepareUpgrade(
     ctx: *Context,
 ) ![]PkgUpgradeInfo {
-    var stmt = try ctx.db.db.prepare(
+    var rows = try ctx.db.conn.rows(
         \\SELECT
         \\  installed.name AS name,
         \\  installed.repo AS repo,
@@ -35,8 +35,8 @@ pub fn prepareUpgrade(
         \\JOIN packages
         \\  ON packages.name = installed.name
         \\ AND packages.repo = installed.repo
-    );
-    defer stmt.deinit();
+    , .{});
+    defer rows.deinit();
 
     var results: std.ArrayList(PkgUpgradeInfo) = .empty;
     defer {
@@ -44,29 +44,23 @@ pub fn prepareUpgrade(
         results.deinit(ctx.alloc);
     }
 
-    var it = try stmt.iterator(
-        struct {
-            name: []const u8,
-            repo: []const u8,
-            installed_ver: []const u8,
-            sync_ver: []const u8,
-        },
-        .{},
-    );
-
-    while (try it.nextAlloc(ctx.alloc, .{})) |row| {
+    while (rows.next()) |row| {
         defer ctx.alloc.free(row.name);
         defer ctx.alloc.free(row.repo);
         defer ctx.alloc.free(row.installed_ver);
         defer ctx.alloc.free(row.sync_ver);
+        const iname = row.text(0);
+        const irepo = row.text(1);
+        const iver = row.text(2);
+        const sver = row.text(3);
 
-        const cmp = version.cmp(row.installed_ver, row.sync_ver);
+        const cmp = version.cmp(iver, sver);
         switch (cmp) {
             -1 => try results.append(
                 ctx.alloc,
                 .{
-                    .name = try ctx.alloc.dupe(u8, row.name),
-                    .repo = try ctx.alloc.dupe(u8, row.repo),
+                    .name = try ctx.alloc.dupe(u8, iname),
+                    .repo = try ctx.alloc.dupe(u8, irepo),
                 },
             ),
             1 => {
@@ -74,10 +68,10 @@ pub fn prepareUpgrade(
                     ctx.alloc,
                     "Local {s}({s}) is newer than synced {s}({s})",
                     .{
-                        row.name,
-                        row.installed_ver,
-                        row.name,
-                        row.sync_ver,
+                        iname,
+                        iver,
+                        iname,
+                        sver,
                     },
                 );
                 defer ctx.alloc.free(msg);
@@ -110,6 +104,32 @@ pub fn prepareUpgrade(
         if (sync.len > 1) return error.CorruptedDatabase;
         try pkgs.append(ctx.alloc, try sync[0].clone(ctx.alloc));
     }
+
+    var files: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (files.items) |f| f.deinit(ctx.alloc);
+        files.deinit(ctx.alloc);
+    }
+
+    for (pkgs.items) |p| {
+        var file_rows = try ctx.db.conn.rows(
+            "SELECT path FROM files WHERE name=?1 AND repo=?2",
+            .{ p.name, p.repo },
+        );
+        defer file_rows.deinit();
+
+        while (file_rows.next()) |row| {
+            const path = row.text(0);
+            try files.append(
+                ctx.alloc,
+                try ctx.alloc.dupe(u8, path),
+            );
+        }
+
+        if (file_rows.err) |err| return err;
+    }
+
+    try ctx.txn.updateFiles(ctx.alloc, files.items);
 
     return pkgs.toOwnedSlice(ctx.alloc);
 }
