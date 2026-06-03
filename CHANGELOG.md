@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - SQLite database for tracking packages and files
 - Small `libarchive` bindings
-- `desc` and `.PKGINFO` file parsers to extract package info
+- `desc`, `PKGBUILD` and `.PKGINFO` file parsers to extract package info
 - Package dependency resolver
 - Transaction-based actions
 - Add BSD-3-Clause license
