@@ -23,14 +23,17 @@ pub fn build(b: *std.Build) void {
         "Skip testing and just build",
     ) orelse false;
 
+    const config_path = b.option(
+        []const u8,
+        "config",
+        "Path to the libnest .zon config file",
+    ) orelse "libnest.zon";
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const dep_opts = .{
-        .target = target,
-        .optimize = optimize,
-    };
-    _ = dep_opts;
+    const config_cwd: std.Build.LazyPath = .{ .cwd_relative = config_path };
+    const config_mod = b.createModule(.{ .root_source_file = config_cwd });
 
     const archive_c = b.addTranslateC(.{
         .root_source_file = b.path("lib/archive.h"),
@@ -38,13 +41,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     archive_c.linkSystemLibrary("archive", .{});
-
-    const git2_c = b.addTranslateC(.{
-        .root_source_file = b.path("lib/git.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    git2_c.linkSystemLibrary("git2", .{});
 
     const module = b.addModule("libnest", .{
         .root_source_file = b.path("src/root.zig"),
@@ -57,8 +53,8 @@ pub fn build(b: *std.Build) void {
                 .module = archive_c.createModule(),
             },
             .{
-                .name = "git2_c",
-                .module = git2_c.createModule(),
+                .name = "config",
+                .module = config_mod,
             },
         },
     });
@@ -94,10 +90,6 @@ pub fn build(b: *std.Build) void {
                     .{
                         .name = "archive_c",
                         .module = archive_c.createModule(),
-                    },
-                    .{
-                        .name = "git2_c",
-                        .module = git2_c.createModule(),
                     },
                 },
             }),
