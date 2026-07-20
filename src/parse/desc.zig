@@ -1,19 +1,16 @@
 const std = @import("std");
-const Pkg = @import("../core/Package.zig");
-const Context = @import("../core/Context.zig");
+const package = @import("../core/package.zig");
+const Context = @import("../core/context.zig").Context;
+const ver = @import("../utils/version.zig");
 
 pub const Field = enum {
     none,
     name,
     version,
     desc,
-    builddate,
     arch,
-    license,
-    filename,
-    packager,
     checksum,
-    signature,
+    licenses,
     replaces,
     conflicts,
     provides,
@@ -26,13 +23,9 @@ pub const Field = enum {
         if (std.mem.eql(u8, name, "NAME")) return .name;
         if (std.mem.eql(u8, name, "VERSION")) return .version;
         if (std.mem.eql(u8, name, "DESC")) return .desc;
-        if (std.mem.eql(u8, name, "BUILDDATE")) return .builddate;
         if (std.mem.eql(u8, name, "ARCH")) return .arch;
-        if (std.mem.eql(u8, name, "LICENSE")) return .license;
-        if (std.mem.eql(u8, name, "FILENAME")) return .filename;
-        if (std.mem.eql(u8, name, "PACKAGER")) return .packager;
         if (std.mem.eql(u8, name, "SHA256SUM")) return .checksum;
-        if (std.mem.eql(u8, name, "PGPSIG")) return .signature;
+        if (std.mem.eql(u8, name, "LICENSE")) return .licenses;
         if (std.mem.eql(u8, name, "REPLACES")) return .replaces;
         if (std.mem.eql(u8, name, "CONFLICTS")) return .conflicts;
         if (std.mem.eql(u8, name, "PROVIDES")) return .provides;
@@ -45,74 +38,39 @@ pub const Field = enum {
     }
 };
 
-pub fn index(
-    ctx: *Context,
-    desc: []const u8,
-    repo: []const u8,
-    hash: []const u8,
-) !void {
-    const pkg = try parse(
-        ctx.alloc,
-        repo,
-        desc,
-    );
-    defer pkg.deinit(ctx.alloc);
-
-    try ctx.db.insertSync(hash, pkg);
-}
-
-pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !Pkg {
-    var pkg = Pkg{
+pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !package.PackageInfo {
+    var pkg = package.PackageInfo{
         .name = &.{},
         .repo = try alloc.dupe(u8, repo),
         .version = &.{},
-        .description = &.{},
-        .build_date = 0,
         .arch = &.{},
-        .license = &.{},
-        .filename = &.{},
-        .packager = &.{},
         .checksum = &.{},
-        .signature = &.{},
+        .licenses = &.{},
         .replaces = &.{},
         .conflicts = &.{},
         .provides = &.{},
         .deps = &.{},
-        .mkdeps = &.{},
-        .optdeps = &.{},
-        .checkdeps = &.{},
     };
 
-    var licenses: std.ArrayListUnmanaged([]const u8) = .empty;
-    var replaces: std.ArrayListUnmanaged([]const u8) = .empty;
-    var conflicts: std.ArrayListUnmanaged([]const u8) = .empty;
-    var provides: std.ArrayListUnmanaged([]const u8) = .empty;
-    var deps: std.ArrayListUnmanaged([]const u8) = .empty;
-    var mkdeps: std.ArrayListUnmanaged([]const u8) = .empty;
-    var optdeps: std.ArrayListUnmanaged([]const u8) = .empty;
-    var checkdeps: std.ArrayListUnmanaged([]const u8) = .empty;
+    var licenses: std.ArrayList([]const u8) = .empty;
+    var replaces: std.ArrayList(package.Constrained) = .empty;
+    var conflicts: std.ArrayList(package.Constrained) = .empty;
+    var provides: std.ArrayList(package.Constrained) = .empty;
+    var deps: std.ArrayList(package.Dependency) = .empty;
 
     var lines = std.mem.splitScalar(u8, src, '\n');
 
     errdefer {
         for (licenses.items) |i| alloc.free(i);
         licenses.deinit(alloc);
-        for (replaces.items) |i| alloc.free(i);
+        for (replaces.items) |i| i.deinit(alloc);
         replaces.deinit(alloc);
-        for (conflicts.items) |i| alloc.free(i);
+        for (conflicts.items) |i| i.deinit(alloc);
         conflicts.deinit(alloc);
-        for (provides.items) |i| alloc.free(i);
+        for (provides.items) |i| i.deinit(alloc);
         provides.deinit(alloc);
-        for (deps.items) |i| alloc.free(i);
+        for (deps.items) |i| i.deinit(alloc);
         deps.deinit(alloc);
-        for (mkdeps.items) |i| alloc.free(i);
-        mkdeps.deinit(alloc);
-        for (optdeps.items) |i| alloc.free(i);
-        optdeps.deinit(alloc);
-        for (checkdeps.items) |i| alloc.free(i);
-        checkdeps.deinit(alloc);
-
-        pkg.deinit(alloc);
     }
 
     var field: Field = .none;
@@ -132,68 +90,58 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !Pkg {
 
         switch (field) {
             .name => pkg.name = try alloc.dupe(u8, trimmed),
-            .version => pkg.version = try alloc.dupe(u8, trimmed),
-            .desc => pkg.description = try alloc.dupe(u8, trimmed),
-
-            .builddate => {
-                pkg.build_date = try std.fmt.parseInt(
-                    i64,
-                    trimmed,
-                    10,
-                );
+            .version => {
+                const evr = ver.parseEVR(trimmed);
+                pkg.epoch = try std.fmt.parseUnsigned(u32, evr.epoch, 10);
+                pkg.version = try alloc.dupe(u8, evr.version);
+                pkg.release = if (evr.release) |r| r else null;
             },
 
             .arch => pkg.arch = try alloc.dupe(u8, trimmed),
-            .filename => pkg.filename = try alloc.dupe(u8, trimmed),
-            .packager => pkg.packager = try alloc.dupe(u8, trimmed),
             .checksum => pkg.checksum = try alloc.dupe(u8, trimmed),
-            .signature => pkg.signature = try alloc.dupe(u8, trimmed),
 
-            .license => try licenses.append(
+            .licenses => try licenses.append(
                 alloc,
                 try alloc.dupe(u8, trimmed),
             ),
             .replaces => try replaces.append(
                 alloc,
-                try alloc.dupe(u8, trimmed),
+                package.Constrained.parse(alloc, trimmed),
             ),
             .conflicts => try conflicts.append(
                 alloc,
-                try alloc.dupe(u8, trimmed),
+                package.Constrained.parse(alloc, trimmed),
             ),
             .provides => try provides.append(
                 alloc,
-                try alloc.dupe(u8, trimmed),
+                package.Constrained.parse(alloc, trimmed),
             ),
             .depends => try deps.append(
                 alloc,
-                try alloc.dupe(u8, trimmed),
+                package.Dependency.parse(trimmed, .Run),
             ),
-            .makedeps => try mkdeps.append(
+            .makedeps => try deps.append(
                 alloc,
-                try alloc.dupe(u8, trimmed),
+                package.Dependency.parse(trimmed, .Make),
             ),
-            .optdeps => try optdeps.append(
+            .checkdeps => try deps.append(
                 alloc,
-                try alloc.dupe(u8, trimmed),
+                package.Dependency.parse(trimmed, .Check),
             ),
-            .checkdeps => try checkdeps.append(
+            .optdeps => try deps.append(
                 alloc,
-                try alloc.dupe(u8, trimmed),
+                package.Dependency.parse(trimmed, .Optional),
             ),
 
             .none => {},
         }
     }
 
-    pkg.license = try licenses.toOwnedSlice(alloc);
+    pkg.licenses = try licenses.toOwnedSlice(alloc);
     pkg.replaces = try replaces.toOwnedSlice(alloc);
     pkg.conflicts = try conflicts.toOwnedSlice(alloc);
     pkg.provides = try provides.toOwnedSlice(alloc);
     pkg.deps = try deps.toOwnedSlice(alloc);
-    pkg.mkdeps = try mkdeps.toOwnedSlice(alloc);
-    pkg.optdeps = try optdeps.toOwnedSlice(alloc);
-    pkg.checkdeps = try checkdeps.toOwnedSlice(alloc);
 
     return pkg;
 }
