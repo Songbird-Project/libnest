@@ -1,4 +1,5 @@
 const std = @import("std");
+const zqlite = @import("zqlite");
 
 const EVR = struct {
     epoch: []const u8,
@@ -6,7 +7,7 @@ const EVR = struct {
     release: ?[]const u8,
 };
 
-fn parseEVR(evr: []const u8) EVR {
+pub fn parseEVR(evr: []const u8) EVR {
     var epoch: []const u8 = "0";
     var version: []const u8 = evr;
     var release: ?[]const u8 = null;
@@ -132,4 +133,37 @@ pub fn cmp(a: ?[]const u8, b: ?[]const u8) i8 {
     if (evr1.release != null and evr2.release != null)
         ret = rpmvercmp(evr1.release.?, evr2.release.?);
     return ret;
+}
+
+pub fn evrCmp(e1: i32, v1: []const u8, r1: ?[]const u8, e2: i32, v2: []const u8, r2: ?[]const u8) i8 {
+    if (e1 != e2) return if (e1 > e2) 1 else -1;
+    const vret = rpmvercmp(v1, v2);
+    if (vret != 0) return vret;
+    if (r1 != null and r2 != null) return rpmvercmp(r1.?, r2.?);
+    return 0;
+}
+
+pub fn sqlCmp(
+    ctx: ?*zqlite.c.sqlite3_context,
+    _: c_int,
+    argv: [*c]?*zqlite.c.sqlite3_value,
+) callconv(.c) void {
+    const e1 = zqlite.c.sqlite3_value_int(argv[0]);
+    const v1 = valSlice(argv[1]);
+    const r1 = valSliceOpt(argv[2]);
+    const e2 = zqlite.c.sqlite3_value_int(argv[3]);
+    const v2 = valSlice(argv[4]);
+    const r2 = valSliceOpt(argv[5]);
+    zqlite.c.sqlite3_result_int(ctx, @intCast(evrCmp(e1, v1, r1, e2, v2, r2)));
+}
+
+fn valSlice(v: ?*zqlite.c.sqlite3_value) []const u8 {
+    const ptr = zqlite.c.sqlite3_value_text(v);
+    const len: usize = @intCast(zqlite.c.sqlite3_value_bytes(v));
+    return ptr[0..len];
+}
+
+fn valSliceOpt(v: ?*zqlite.c.sqlite3_value) ?[]const u8 {
+    if (zqlite.c.sqlite3_value_type(v) == zqlite.c.SQLITE_NULL) return null;
+    return valSlice(v);
 }
