@@ -27,7 +27,6 @@ pub const PackageInfo = struct {
     release: ?[]const u8,
     arch: []const u8,
     repo: []const u8,
-    checksum: ?[32]u8,
     kind: PackageKind,
     deps: []Dependency,
     licenses: []const []const u8,
@@ -41,15 +40,15 @@ pub const PackageInfo = struct {
         if (self.release) |r| alloc.free(r);
         alloc.free(self.arch);
         alloc.free(self.repo);
-        for (self.deps) |dep| dep.deinit();
+        for (self.deps) |*dep| dep.deinit(alloc);
         alloc.free(self.deps);
         for (self.licenses) |v| alloc.free(v);
         alloc.free(self.licenses);
-        for (self.provides) |v| v.deinit(alloc);
+        for (self.provides) |*v| v.deinit(alloc);
         alloc.free(self.provides);
-        for (self.conflicts) |v| v.deinit(alloc);
+        for (self.conflicts) |*v| v.deinit(alloc);
         alloc.free(self.conflicts);
-        for (self.replaces) |v| v.deinit(alloc);
+        for (self.replaces) |*v| v.deinit(alloc);
         alloc.free(self.replaces);
     }
 };
@@ -75,10 +74,7 @@ pub const Constrained = struct {
     pub fn parse(alloc: std.mem.Allocator, src: []const u8) !Constrained {
         var parsed: Constrained = undefined;
 
-        if (std.mem.findScalar(u8, src, '=') or
-            std.mem.findScalar(u8, src, '>') or
-            std.mem.findScalar(u8, src, '<')) |idx|
-        {
+        if (std.mem.findAny(u8, src, "=<>")) |idx| {
             parsed.name = try alloc.dupe(u8, src[0..idx]);
             parsed.constraint = try alloc.dupe(u8, src[idx..]);
         } else {
@@ -104,10 +100,7 @@ pub const Dependency = struct {
         var parsed: Dependency = undefined;
         parsed.kind = kind;
 
-        if (std.mem.findScalar(u8, dep, '=') or
-            std.mem.findScalar(u8, dep, '>') or
-            std.mem.findScalar(u8, dep, '<')) |idx|
-        {
+        if (std.mem.findAny(u8, dep, "=<>")) |idx| {
             parsed.name = try alloc.dupe(u8, dep[0..idx]);
             parsed.constraint = try alloc.dupe(u8, dep[idx..]);
         } else {

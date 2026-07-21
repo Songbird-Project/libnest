@@ -2,6 +2,7 @@ const std = @import("std");
 const zqlite = @import("zqlite");
 const Context = @import("context.zig").Context;
 const version = @import("../utils/version.zig");
+const Repo = @import("repo.zig").Repo;
 
 pub fn newInstalledConn(ctx: Context) !zqlite.Conn {
     const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
@@ -10,6 +11,10 @@ pub fn newInstalledConn(ctx: Context) !zqlite.Conn {
         "installed.db",
     });
     defer ctx.alloc.free(path);
+
+    if (std.Io.Dir.path.dirname(path)) |dir| {
+        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+    }
 
     const flags = zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode;
     const conn = try zqlite.open(path, flags);
@@ -40,7 +45,7 @@ pub fn newInstalledConn(ctx: Context) !zqlite.Conn {
         \\CREATE TABLE IF NOT EXISTS depends(
         \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
         \\  name TEXT NOT NULL,
-        \\  kind TEXT NOT NULL DEFAULT 'run' check(kind IN ('run', 'make', 'check', 'optional'))
+        \\  kind INTEGER NOT NULL DEFAULT 0 check(kind IN (0, 1, 2, 3))
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS provides(
@@ -73,8 +78,8 @@ pub fn newInstalledConn(ctx: Context) !zqlite.Conn {
     return conn;
 }
 
-pub fn newRepoConn(ctx: Context, repo: []const u8, arch: []const u8) !zqlite.Conn {
-    const name = try std.fmt.allocPrint(ctx.alloc, "{s}-{s}.db", .{ repo, arch });
+pub fn newRepoConn(ctx: Context, repo: Repo) !zqlite.Conn {
+    const name = try std.fmt.allocPrint(ctx.alloc, "{s}-{s}.db", .{ repo.name, repo.arch });
     defer ctx.alloc.free(name);
     const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
         ctx.path_options.root,
@@ -82,6 +87,10 @@ pub fn newRepoConn(ctx: Context, repo: []const u8, arch: []const u8) !zqlite.Con
         name,
     });
     defer ctx.alloc.free(path);
+
+    if (std.Io.Dir.path.dirname(path)) |dir| {
+        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+    }
 
     const flags = zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode;
     const conn = try zqlite.open(path, flags);
@@ -94,8 +103,8 @@ pub fn newRepoConn(ctx: Context, repo: []const u8, arch: []const u8) !zqlite.Con
         \\
         \\CREATE TABLE IF NOT EXISTS metadata(
         \\  last_refresh INTEGER,
-        \\  architecture STRING NOT NULL,
-        \\  repo STRING NOT NULL
+        \\  name STRING NOT NULL,
+        \\  architecture STRING NOT NULL
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS packages(
@@ -104,7 +113,6 @@ pub fn newRepoConn(ctx: Context, repo: []const u8, arch: []const u8) !zqlite.Con
         \\  epoch INTEGER NOT NULL DEFAULT 0,
         \\  version TEXT NOT NULL,
         \\  release TEXT,
-        \\  checksum TEXT,
         \\  UNIQUE(name)
         \\);
         \\
@@ -112,7 +120,7 @@ pub fn newRepoConn(ctx: Context, repo: []const u8, arch: []const u8) !zqlite.Con
         \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
         \\  name TEXT NOT NULL,
         \\  ver_constraint TEXT,
-        \\  kind TEXT NOT NULL DEFAULT 'run' check(kind IN ('run', 'make', 'check', 'optional'))
+        \\  kind INTEGER NOT NULL DEFAULT 0 check(kind IN (0, 1, 2, 3))
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS provides(
@@ -145,6 +153,11 @@ pub fn newRepoConn(ctx: Context, repo: []const u8, arch: []const u8) !zqlite.Con
         \\CREATE INDEX IF NOT EXISTS licenses_idx ON licenses(name);
     );
 
+    try conn.exec(
+        "INSERT INTO metadata(name, architecture) VALUES (?1, ?2)",
+        .{ repo.name, repo.arch },
+    );
+
     const res = zqlite.c.sqlite3_create_function_v2(
         conn.conn,
         "vercmp",
@@ -157,7 +170,7 @@ pub fn newRepoConn(ctx: Context, repo: []const u8, arch: []const u8) !zqlite.Con
         null,
     );
     if (res != zqlite.c.SQLITE_OK) {
-        try ctx.log(.Error, "Failed to register custom SQL function `vercmp`: {s}\n", conn.lastError());
+        try ctx.log(.Error, "Failed to register custom SQL function `vercmp`: {s}\n", .{conn.lastError()});
         return error.FailedToRegisterFunction;
     }
 

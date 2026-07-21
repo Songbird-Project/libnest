@@ -7,9 +7,7 @@ pub const Field = enum {
     none,
     name,
     version,
-    desc,
     arch,
-    checksum,
     licenses,
     replaces,
     conflicts,
@@ -22,9 +20,7 @@ pub const Field = enum {
     pub fn parse(name: []const u8) Field {
         if (std.mem.eql(u8, name, "NAME")) return .name;
         if (std.mem.eql(u8, name, "VERSION")) return .version;
-        if (std.mem.eql(u8, name, "DESC")) return .desc;
         if (std.mem.eql(u8, name, "ARCH")) return .arch;
-        if (std.mem.eql(u8, name, "SHA256SUM")) return .checksum;
         if (std.mem.eql(u8, name, "LICENSE")) return .licenses;
         if (std.mem.eql(u8, name, "REPLACES")) return .replaces;
         if (std.mem.eql(u8, name, "CONFLICTS")) return .conflicts;
@@ -42,9 +38,11 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
     var pkg = package.PackageInfo{
         .name = &.{},
         .repo = try alloc.dupe(u8, repo),
+        .epoch = 0,
         .version = &.{},
+        .release = null,
         .arch = &.{},
-        .checksum = &.{},
+        .kind = .Binary,
         .licenses = &.{},
         .replaces = &.{},
         .conflicts = &.{},
@@ -63,13 +61,13 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
     errdefer {
         for (licenses.items) |i| alloc.free(i);
         licenses.deinit(alloc);
-        for (replaces.items) |i| i.deinit(alloc);
+        for (replaces.items) |*i| i.deinit(alloc);
         replaces.deinit(alloc);
-        for (conflicts.items) |i| i.deinit(alloc);
+        for (conflicts.items) |*i| i.deinit(alloc);
         conflicts.deinit(alloc);
-        for (provides.items) |i| i.deinit(alloc);
+        for (provides.items) |*i| i.deinit(alloc);
         provides.deinit(alloc);
-        for (deps.items) |i| i.deinit(alloc);
+        for (deps.items) |*i| i.deinit(alloc);
         deps.deinit(alloc);
     }
 
@@ -94,11 +92,10 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
                 const evr = ver.parseEVR(trimmed);
                 pkg.epoch = try std.fmt.parseUnsigned(u32, evr.epoch, 10);
                 pkg.version = try alloc.dupe(u8, evr.version);
-                pkg.release = if (evr.release) |r| r else null;
+                pkg.release = if (evr.release) |r| try alloc.dupe(u8, r) else null;
             },
 
             .arch => pkg.arch = try alloc.dupe(u8, trimmed),
-            .checksum => pkg.checksum = try alloc.dupe(u8, trimmed),
 
             .licenses => try licenses.append(
                 alloc,
@@ -106,31 +103,31 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
             ),
             .replaces => try replaces.append(
                 alloc,
-                package.Constrained.parse(alloc, trimmed),
+                try package.Constrained.parse(alloc, trimmed),
             ),
             .conflicts => try conflicts.append(
                 alloc,
-                package.Constrained.parse(alloc, trimmed),
+                try package.Constrained.parse(alloc, trimmed),
             ),
             .provides => try provides.append(
                 alloc,
-                package.Constrained.parse(alloc, trimmed),
+                try package.Constrained.parse(alloc, trimmed),
             ),
             .depends => try deps.append(
                 alloc,
-                package.Dependency.parse(trimmed, .Run),
+                try package.Dependency.parse(alloc, trimmed, .Run),
             ),
             .makedeps => try deps.append(
                 alloc,
-                package.Dependency.parse(trimmed, .Make),
+                try package.Dependency.parse(alloc, trimmed, .Make),
             ),
             .checkdeps => try deps.append(
                 alloc,
-                package.Dependency.parse(trimmed, .Check),
+                try package.Dependency.parse(alloc, trimmed, .Check),
             ),
             .optdeps => try deps.append(
                 alloc,
-                package.Dependency.parse(trimmed, .Optional),
+                try package.Dependency.parse(alloc, trimmed, .Optional),
             ),
 
             .none => {},

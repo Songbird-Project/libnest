@@ -5,13 +5,17 @@ const context = @import("../core/context.zig");
 const Context = context.Context;
 
 pub const CurlClient = struct {
-    easy: curl.Easy,
-    ca_bundle: std.array_list.Aligned(u8),
+    easy: *curl.Easy,
+    ca_bundle: std.array_list.Aligned(u8, null),
 
     pub fn init(ctx: Context) !CurlClient {
-        const ca_bundle = try curl.allocCABundle(ctx.alloc, ctx.io);
+        var ca_bundle = try curl.allocCABundle(ctx.alloc, ctx.io);
         errdefer ca_bundle.deinit(ctx.alloc);
-        const easy = try curl.Easy.init(.{ .ca_bundle = ca_bundle });
+
+        const easy = try ctx.alloc.create(curl.Easy);
+        errdefer ctx.alloc.destroy(easy);
+
+        easy.* = try curl.Easy.init(.{ .ca_bundle = ca_bundle });
         errdefer easy.deinit();
 
         return .{
@@ -22,6 +26,7 @@ pub const CurlClient = struct {
 
     pub fn deinit(self: *CurlClient, ctx: Context) void {
         self.easy.deinit();
+        ctx.alloc.destroy(self.easy);
         self.ca_bundle.deinit(ctx.alloc);
     }
 

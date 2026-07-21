@@ -18,11 +18,16 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
     );
     defer ctx.alloc.free(db_name);
     const dest = try std.Io.Dir.path.join(ctx.alloc, &.{
-        "/tmp",
+        ctx.path_options.root,
+        ctx.path_options.cache,
         "db",
         db_name,
     });
     defer ctx.alloc.free(dest);
+
+    if (std.Io.Dir.path.dirname(dest)) |dir| {
+        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+    }
 
     for (repo.mirrors) |mirror| {
         const repo_url = try std.mem.replaceOwned(
@@ -41,6 +46,7 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
             "$arch",
             repo.arch,
         );
+        defer ctx.alloc.free(resolved_url);
 
         const url = try std.fmt.allocPrint(
             ctx.alloc,
@@ -49,31 +55,54 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
         );
         defer ctx.alloc.free(url);
 
-        client.downloadToFile(ctx, url, dest) catch continue;
+        client.downloadToFile(ctx, url, dest) catch {
+            try ctx.log(
+                .Error,
+                "Failed to download repo file for '{s}' from mirror '{s}'\n",
+                .{ repo.name, url },
+            );
+            continue;
+        };
         break;
     }
 
     var reader = try archive.Reader.init();
     defer reader.deinit();
 
-    const db_file = try std.Io.Dir.cwd().openFile(ctx.io, dest, .{});
+    const db_file = std.Io.Dir.cwd().openFile(
+        ctx.io,
+        dest,
+        .{},
+    ) catch |err| switch (err) {
+        error.FileNotFound => {
+            try ctx.log(
+                .Error,
+                "Failed to download repo file for '{s}'\n",
+                .{repo.name},
+            );
+            return err;
+        },
+        else => return err,
+    };
     defer db_file.close(ctx.io);
 
     try reader.openFd(db_file.handle);
     var buf: [8192]u8 = undefined;
 
-    const sync_stmt = try db.prepare(
-        \\INSERT INTO packages(name, epoch, version, release, checksum)
-        \\VALUES (?1, ?2, ?3, ?4, ?5)
+    const sync_stmt = db.prepare(
+        \\INSERT INTO packages(name, epoch, version, release)
+        \\VALUES (?1, ?2, ?3, ?4)
         \\ON CONFLICT(name) DO UPDATE SET
         \\  epoch = excluded.epoch,
         \\  version = excluded.version,
-        \\  release = excluded.release,
-        \\  checksum = excluded.checksum
+        \\  release = excluded.release
         \\WHERE vercmp(excluded.epoch, excluded.version, excluded.release,
         \\             packages.epoch, packages.version, packages.release) > 0
         \\RETURNING id;
-    );
+    ) catch |err| {
+        try ctx.log(.Error, "Failed to prepare SQL statement: {s}\n", .{db.lastError()});
+        return err;
+    };
 
     try db.transaction();
 
@@ -93,7 +122,7 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
             try contents.appendSlice(ctx.alloc, buf[0..read]);
         }
 
-        const pkg_info = try desc.parse(
+        var pkg_info = try desc.parse(
             ctx.alloc,
             repo.name,
             contents.items,
@@ -105,24 +134,21 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
             pkg_info.epoch,
             pkg_info.version,
             pkg_info.release,
-            pkg_info.checksum,
         });
         const row = try sync_stmt.step();
 
         if (row) {
-            const id = try sync_stmt.int(0);
+            const id = sync_stmt.int(0);
 
-            try db.exec(
-                \\DELETE FROM depends WHERE package_id = ?1;
-                \\DELETE FROM provides WHERE package_id = ?1;
-                \\DELETE FROM conflicts WHERE package_id = ?1;
-                \\DELETE FROM replaces WHERE package_id = ?1;
-                \\DELETE FROM licenses WHERE package_id = ?1;
-            , .{id});
+            try db.exec("DELETE FROM depends WHERE package_id = ?1;", .{id});
+            try db.exec("DELETE FROM provides WHERE package_id = ?1;", .{id});
+            try db.exec("DELETE FROM conflicts WHERE package_id = ?1;", .{id});
+            try db.exec("DELETE FROM replaces WHERE package_id = ?1;", .{id});
+            try db.exec("DELETE FROM licenses WHERE package_id = ?1;", .{id});
             for (pkg_info.deps) |dep| {
                 try db.exec(
-                    \\INSERT INTO depends(package_id, name, kind, constraint) VALUES (?1, ?2, ?3, ?4)
-                , .{ id, dep.name, dep.kind, dep.constraint });
+                    \\INSERT INTO depends(package_id, name, kind, ver_constraint) VALUES (?1, ?2, ?3, ?4)
+                , .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
             }
             for (pkg_info.provides) |provide| {
                 try db.exec(
@@ -147,7 +173,7 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
             }
         }
 
-        sync_stmt.reset();
+        try sync_stmt.reset();
         try db.execNoArgs("RELEASE pkg");
     }
     try db.commit();

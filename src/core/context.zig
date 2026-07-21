@@ -13,9 +13,9 @@ pub const LogOptions = struct {
 
 pub const PathOptions = struct {
     root: []const u8 = "/",
-    config: []const u8,
-    cache: []const u8,
-    state: []const u8,
+    config: []const u8 = "etc/" ++ config.name,
+    cache: []const u8 = "var/cache/" ++ config.name,
+    state: []const u8 = "var/lib/" ++ config.name,
 };
 
 pub const Context = struct {
@@ -23,11 +23,7 @@ pub const Context = struct {
     alloc: std.mem.Allocator,
 
     log_options: LogOptions = .{},
-    path_options: PathOptions = .{
-        .config = "etc/" ++ config.name,
-        .cache = "var/cache/" ++ config.name,
-        .state = "var/lib/" ++ config.name,
-    },
+    path_options: PathOptions = .{},
 
     log_cb: *const fn (std.Io, LogLevel, []const u8) void = defaultLogCb,
 
