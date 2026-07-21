@@ -21,7 +21,7 @@ pub fn newInstalledConn(ctx: Context) !zqlite.Conn {
     errdefer conn.close();
 
     try conn.execNoArgs(
-        \\PRAGMA foreign_keys=true;
+        \\PRAGMA foreign_keys=ON;
         \\PRAGMA journal_mode=WAL;
         \\PRAGMA cache_size=-200000;
         \\
@@ -40,6 +40,20 @@ pub fn newInstalledConn(ctx: Context) !zqlite.Conn {
         \\  repo TEXT NOT NULL,
         \\  kind TEXT NOT NULL check(kind IN ('binary', 'source')),
         \\  UNIQUE(name, epoch, version, release)
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS blobs(
+        \\  hash BLOB PRIMARY KEY,
+        \\  size INTEGER NOT NULL,
+        \\  created INTEGER NOT NULL
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS files(
+        \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+        \\  path TEXT NOT NULL,
+        \\  hash BLOB NOT NULL REFERENCES blobs(hash) ON DELETE RESTRICT,
+        \\  mode INTEGER NOT NULL,
+        \\  PRIMARY KEY (package_id, path)
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS depends(
@@ -68,6 +82,7 @@ pub fn newInstalledConn(ctx: Context) !zqlite.Conn {
         \\  name TEXT NOT NULL
         \\);
         \\
+        \\CREATE INDEX IF NOT EXISTS file_idx ON files(hash);
         \\CREATE INDEX IF NOT EXISTS depends_idx ON depends(name);
         \\CREATE INDEX IF NOT EXISTS provides_idx ON provides(name);
         \\CREATE INDEX IF NOT EXISTS conflicts_idx ON conflicts(name);
@@ -97,7 +112,7 @@ pub fn newRepoConn(ctx: Context, repo: Repo) !zqlite.Conn {
     errdefer conn.close();
 
     try conn.execNoArgs(
-        \\PRAGMA foreign_keys=true;
+        \\PRAGMA foreign_keys=ON;
         \\PRAGMA journal_mode=WAL;
         \\PRAGMA cache_size=-200000;
         \\
