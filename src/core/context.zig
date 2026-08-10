@@ -16,6 +16,7 @@ pub const PathOptions = struct {
     config: []const u8 = "etc/" ++ config.name,
     cache: []const u8 = "var/cache/" ++ config.name,
     state: []const u8 = "var/lib/" ++ config.name,
+    store: []const u8 = "etc/" ++ config.name ++ "/store",
 };
 
 pub const Context = struct {
