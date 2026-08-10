@@ -110,9 +110,6 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
         if (!std.mem.eql(u8, std.Io.Dir.path.basename(path), "desc")) continue;
 
-        try db.execNoArgs("SAVEPOINT pkg");
-        errdefer db.execNoArgs("ROLLBACK TO pkg") catch {};
-
         var contents: std.ArrayList(u8) = .empty;
         defer contents.deinit(ctx.alloc);
 
@@ -128,6 +125,12 @@ pub fn syncRepo(ctx: Context, db: zqlite.Conn, repo: Repo) !void {
             contents.items,
         );
         defer pkg_info.deinit(ctx.alloc);
+
+        if (!std.mem.eql(u8, pkg_info.arch, repo.arch) and
+            !std.mem.eql(u8, pkg_info.arch, "any")) continue;
+
+        try db.execNoArgs("SAVEPOINT pkg");
+        errdefer db.execNoArgs("ROLLBACK TO pkg") catch {};
 
         try sync_stmt.bind(.{
             pkg_info.name,
