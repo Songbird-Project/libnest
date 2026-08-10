@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const mem = @import("../utils/mem.zig");
 
 pub const PackageKind = enum {
@@ -34,7 +35,7 @@ pub const PackageInfo = struct {
     conflicts: []Constrained,
     replaces: []Constrained,
 
-    pub fn deinit(self: *PackageInfo, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *PackageInfo, alloc: Allocator) void {
         alloc.free(self.name);
         alloc.free(self.version);
         if (self.release) |r| alloc.free(r);
@@ -71,7 +72,7 @@ pub const Constrained = struct {
     name: []const u8,
     constraint: ?[]const u8,
 
-    pub fn parse(alloc: std.mem.Allocator, src: []const u8) !Constrained {
+    pub fn parse(alloc: Allocator, src: []const u8) !Constrained {
         var parsed: Constrained = undefined;
 
         if (std.mem.findAny(u8, src, "=<>")) |idx| {
@@ -85,7 +86,7 @@ pub const Constrained = struct {
         return parsed;
     }
 
-    pub fn deinit(self: *Constrained, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Constrained, alloc: Allocator) void {
         alloc.free(self.name);
         if (self.constraint) |c| alloc.free(c);
     }
@@ -96,7 +97,7 @@ pub const Dependency = struct {
     kind: DepKind,
     constraint: ?[]const u8,
 
-    pub fn parse(alloc: std.mem.Allocator, dep: []const u8, kind: DepKind) !Dependency {
+    pub fn parse(alloc: Allocator, dep: []const u8, kind: DepKind) !Dependency {
         var parsed: Dependency = undefined;
         parsed.kind = kind;
 
@@ -111,7 +112,7 @@ pub const Dependency = struct {
         return parsed;
     }
 
-    pub fn deinit(self: *Dependency, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Dependency, alloc: Allocator) void {
         alloc.free(self.name);
         if (self.constraint) |c| alloc.free(c);
     }
@@ -122,4 +123,11 @@ pub const Package = struct {
     // hash of the package .tar.zstd
     hash: [32]u8,
     outputs: std.StringHashMap(PackageOutput),
+
+    pub fn deinit(self: *Package, alloc: Allocator) void {
+        self.info.deinit(alloc);
+        var it = self.outputs.valueIterator();
+        while (it.next()) |value| alloc.free(value.path);
+        self.outputs.deinit();
+    }
 };
