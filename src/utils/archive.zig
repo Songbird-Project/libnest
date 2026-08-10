@@ -1,4 +1,9 @@
 const std = @import("std");
+const Io = std.Io;
+const context = @import("../core/context.zig");
+const Ctx = context.Context;
+const store = @import("../store/store.zig");
+const ingest = @import("../store/ingest.zig");
 pub const c = @import("archive_c");
 
 pub const ArchiveError = error{
@@ -10,108 +15,67 @@ pub const ArchiveError = error{
     ReadFailed,
 };
 
-// pub const Writer = struct {
-//     writer: *c.struct_archive,
-//
-//     pub fn init() ArchiveError!Writer {
-//         const writer = c.archive_write_disk_new() orelse
-//             return error.UnableToCreateWriter;
-//
-//         _ = c.archive_write_disk_set_options(
-//             writer,
-//             c.ARCHIVE_EXTRACT_PERM |
-//                 c.ARCHIVE_EXTRACT_TIME |
-//                 c.ARCHIVE_EXTRACT_OWNER |
-//                 c.ARCHIVE_EXTRACT_ACL |
-//                 c.ARCHIVE_EXTRACT_SECURE_NODOTDOT |
-//                 c.ARCHIVE_EXTRACT_SECURE_SYMLINKS |
-//                 c.ARCHIVE_EXTRACT_SAFE_WRITES |
-//                 c.ARCHIVE_EXTRACT_UNLINK |
-//                 c.ARCHIVE_EXTRACT_FFLAGS,
-//         );
-//
-//         return .{ .writer = writer };
-//     }
-//
-//     pub fn deinit(self: *Writer) void {
-//         _ = c.archive_write_free(self.writer);
-//     }
-//
-//     pub fn writeHeader(
-//         self: *Writer,
-//         ctx: *Context,
-//         info: installer.PkgInstallInfo,
-//         entry: *c.archive_entry,
-//         path: []const u8,
-//     ) !void {
-//         const cpath = try ctx.alloc.dupeZ(u8, path);
-//         defer ctx.alloc.free(cpath);
-//
-//         const cloned = c.archive_entry_clone(entry) orelse
-//             return error.OutOfMemory;
-//         defer c.archive_entry_free(cloned);
-//
-//         c.archive_entry_set_pathname(cloned, cpath.ptr);
-//
-//         if (c.archive_entry_hardlink(cloned)) |target_ptr| {
-//             const target: []const u8 = std.mem.span(target_ptr);
-//
-//             var rel = target;
-//             if (std.mem.startsWith(u8, path, "./")) rel = rel[2..];
-//             if (std.mem.startsWith(u8, path, "/")) rel = rel[1..];
-//
-//             const basename = std.Io.Dir.path.basename(rel);
-//             const target_path = if (basename.len > 0 and basename[0] == '.')
-//                 try std.Io.Dir.path.join(ctx.alloc, &.{
-//                     info.cache,
-//                     rel,
-//                 })
-//             else if (std.mem.startsWith(u8, path, "/usr/share/libalpm/hooks/"))
-//                 try std.Io.Dir.path.join(ctx.alloc, &.{
-//                     ctx.paths.hook,
-//                     rel[25..],
-//                 })
-//             else
-//                 try std.Io.Dir.path.join(ctx.alloc, &.{
-//                     ctx.paths.root,
-//                     rel,
-//                 });
-//             defer ctx.alloc.free(target_path);
-//
-//             const c_target_path = try ctx.alloc.dupeZ(u8, target_path);
-//             defer ctx.alloc.free(c_target_path);
-//
-//             c.archive_entry_set_hardlink(cloned, c_target_path.ptr);
-//         }
-//
-//         const ret = c.archive_write_header(self.writer, cloned);
-//         if (ret != c.ARCHIVE_OK) {
-//             std.debug.print("{s}\n", .{c.archive_error_string(self.writer)});
-//             return error.WriteHeaderFailed;
-//         }
-//     }
-//
-//     pub fn writeData(
-//         self: *Writer,
-//         data: []const u8,
-//         bytes: usize,
-//     ) ArchiveError!void {
-//         const ret = c.archive_write_data(
-//             self.writer,
-//             data.ptr,
-//             bytes,
-//         );
-//
-//         if (ret < 0) {
-//             std.debug.print("{s}\n", .{c.archive_error_string(self.writer)});
-//             return error.WriteFailed;
-//         }
-//     }
-//
-//     pub fn finishEntry(self: *Writer) ArchiveError!void {
-//         _ = c.archive_write_finish_entry(self.writer);
-//     }
-// };
+pub fn ingestFile(ctx: Ctx, reader: *Reader, path: []const u8, mode: u32) !ingest.IngestResult {
+    var src: std.Random.IoSource = .{ .io = ctx.io };
+    const rand = src.interface();
+
+    const tmp_name = try std.fmt.allocPrint(ctx.alloc, ".tmp-{s}", .{rand.int(u8)});
+    defer ctx.alloc.free(tmp_name);
+    const tmp_path = try Io.Dir.path.join(ctx.alloc, &.{
+        ctx.path_options.store,
+        tmp_name,
+    });
+    defer ctx.alloc.free(tmp_path);
+
+    const tmp_file = try Io.Dir.cwd().createFile(ctx.io, tmp_path, .{});
+    defer tmp_file.close(ctx.io);
+    var tmp_buf: [4096]u8 = undefined;
+    var tmp_writer = tmp_file.writer(ctx.io, &tmp_buf);
+    const writer = &tmp_writer.interface;
+
+    var hasher: std.crypto.hash.Blake3 = .init(.{});
+    var total_bytes: usize = 0;
+
+    var buf: [4096]u8 = undefined;
+    try reader.openFd(tmp_file.handle);
+    while (true) {
+        const bytes = try reader.readData(&buf);
+        if (bytes <= 0) break;
+        hasher.update(buf[0..bytes]);
+        try writer.writeAll(buf[0..bytes]);
+        total_bytes += bytes;
+    }
+
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+
+    const blob_path = try store.objectPath(ctx, hash);
+
+    var found = true;
+    Io.Dir.cwd().access(ctx.io, blob_path, .{}) catch |e| switch (e) {
+        error.FileNotFound => found = false,
+        else => return e,
+    };
+    if (found) {
+        try Io.Dir.cwd().deleteFile(ctx.io, tmp_path);
+    } else {
+        try Io.Dir.cwd().createDirPath(ctx.io, Io.Dir.path.dirname(blob_path));
+        try Io.Dir.cwd().rename(
+            tmp_path,
+            .cwd(),
+            blob_path,
+            ctx.io,
+        );
+    }
+
+    return .{
+        .kind = .file,
+        .path = path,
+        .hash = hash,
+        .size = total_bytes,
+        .mode = mode,
+    };
+}
 
 pub const Reader = struct {
     archive: *c.struct_archive,
