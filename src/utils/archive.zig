@@ -37,7 +37,6 @@ pub fn ingestFile(ctx: Ctx, reader: *Reader, path: []const u8, mode: u32) !inges
     var total_bytes: usize = 0;
 
     var buf: [4096]u8 = undefined;
-    try reader.openFd(tmp_file.handle);
     while (true) {
         const bytes = try reader.readData(&buf);
         if (bytes <= 0) break;
