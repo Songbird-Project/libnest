@@ -67,7 +67,6 @@ pub fn newConn(ctx: Context) !StoreConn {
         \\  release TEXT NOT NULL,
         \\  arch TEXT NOT NULL,
         \\  repo TEXT NOT NULL,
-        \\  kind TEXT NOT NULL check(kind IN ('binary', 'source')),
         \\  UNIQUE(name, epoch, version, release)
         \\);
         \\
@@ -169,7 +168,7 @@ pub fn newConn(ctx: Context) !StoreConn {
 }
 
 pub fn objectPath(ctx: Context, hash: [32]u8) ![]u8 {
-    var buf: [32]u8 = undefined;
+    var buf: [64]u8 = undefined;
     const hex = std.fmt.bufPrint(&buf, "{x}", .{hash}) catch unreachable;
     return try std.Io.Dir.path.join(ctx.alloc, &.{
         ctx.path_options.store,
