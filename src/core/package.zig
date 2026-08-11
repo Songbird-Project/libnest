@@ -2,38 +2,19 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mem = @import("../utils/mem.zig");
 
-pub const PackageKind = enum {
-    Binary,
-    Source,
-
-    pub fn fromString(str: []const u8) PackageKind {
-        var lower_buf: [8]u8 = undefined;
-        const lower = std.ascii.lowerString(&lower_buf, str);
-
-        return if (std.mem.eql(u8, lower, "binary")) .Binary else .Source;
-    }
-
-    pub fn toString(self: @This()) []const u8 {
-        return switch (self) {
-            .Binary => "binary",
-            .Source => "source",
-        };
-    }
-};
-
 pub const PackageInfo = struct {
     name: []const u8,
     epoch: u32 = 0,
     version: []const u8,
-    release: ?[]const u8,
+    release: ?[]const u8 = null,
     arch: []const u8,
     repo: []const u8,
-    kind: PackageKind,
-    deps: []Dependency,
-    licenses: []const []const u8,
-    provides: []Constrained,
-    conflicts: []Constrained,
-    replaces: []Constrained,
+    checksum: ?[32]u8 = null,
+    deps: []Dependency = &.{},
+    licenses: []const []const u8 = &.{},
+    provides: []Constrained = &.{},
+    conflicts: []Constrained = &.{},
+    replaces: []Constrained = &.{},
 
     pub fn deinit(self: *PackageInfo, alloc: Allocator) void {
         alloc.free(self.name);
@@ -54,12 +35,13 @@ pub const PackageInfo = struct {
     }
 };
 
-pub const PackageOutput = struct {
-    // hash of the output file
-    hash: [32]u8,
-    path: []const u8,
-    created: std.Io.Timestamp,
-};
+// The DB handles tracking files and blobs
+// pub const PackageOutput = struct {
+//     // hash of the output file
+//     hash: [32]u8,
+//     path: []const u8,
+//     created: std.Io.Timestamp,
+// };
 
 pub const DepKind = enum(u8) {
     Run,
@@ -70,7 +52,7 @@ pub const DepKind = enum(u8) {
 
 pub const Constrained = struct {
     name: []const u8,
-    constraint: ?[]const u8,
+    constraint: ?[]const u8 = null,
 
     pub fn parse(alloc: Allocator, src: []const u8) !Constrained {
         var parsed: Constrained = undefined;
@@ -122,12 +104,8 @@ pub const Package = struct {
     info: PackageInfo,
     // hash of the package .tar.zstd
     hash: [32]u8,
-    outputs: std.StringHashMap(PackageOutput),
 
     pub fn deinit(self: *Package, alloc: Allocator) void {
         self.info.deinit(alloc);
-        var it = self.outputs.valueIterator();
-        while (it.next()) |value| alloc.free(value.path);
-        self.outputs.deinit();
     }
 };
