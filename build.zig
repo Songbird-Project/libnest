@@ -2,15 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    const emit_static = b.option(
+    const emit_library = b.option(
         bool,
-        "emit-static",
-        "Emit a static library",
-    ) orelse false;
-    const emit_dynamic = b.option(
-        bool,
-        "emit-dynamic",
-        "Emit a dynamic library",
+        "emit-lib",
+        "Whether to build dynamic and static library files",
     ) orelse false;
     const test_filters = b.option(
         [][]const u8,
@@ -107,8 +102,16 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_tests.step);
     }
 
-    if (emit_dynamic) {
-        const lib = b.addLibrary(.{
+    if (emit_library) {
+        var lib = b.addLibrary(.{
+            .name = "nest",
+            .root_module = module,
+            .linkage = .static,
+        });
+
+        b.installArtifact(lib);
+
+        lib = b.addLibrary(.{
             .name = "nest",
             .root_module = module,
             .linkage = .dynamic,
@@ -118,17 +121,6 @@ pub fn build(b: *std.Build) void {
                 .patch = 0,
             },
         });
-
-        b.installArtifact(lib);
-    }
-
-    if (emit_static) {
-        const lib = b.addLibrary(.{
-            .name = "nest",
-            .root_module = module,
-            .linkage = .static,
-        });
-
         b.installArtifact(lib);
     }
 }
