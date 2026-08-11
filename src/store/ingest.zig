@@ -33,24 +33,28 @@ pub const IngestResult = struct {
 
     links_to: ?[]const u8 = null,
 
-    pub fn deinit(self: *IngestResult, alloc: Allocator) !void {
+    pub fn deinit(self: IngestResult, alloc: Allocator) void {
         alloc.free(self.path);
         if (self.target) |t| alloc.free(t);
         if (self.links_to) |l| alloc.free(l);
     }
 };
 
+/// ingestPackage requires that a transaction is already active
 pub fn ingestPackage(ctx: Ctx, db: store.StoreConn, reader: *archive.Reader, id: i64) !void {
     var hashes: std.StringHashMap([32]u8) = .init(ctx.alloc);
     defer hashes.deinit();
 
-    try db.transaction();
-    errdefer db.rollback();
-
     while (try reader.nextEntry()) |entry| {
         const result = try ingestEntry(ctx, reader, entry);
+        defer result.deinit(ctx.alloc);
+
+        if (result.kind == .skip) continue;
+
+        try db.execNoArgs("SAVEPOINT ingest");
+        errdefer db.execNoArgs("ROLLBACK TO ingest") catch {};
+
         switch (result.kind) {
-            .skip => continue,
             .file => {
                 try hashes.put(result.path, result.hash.?);
                 try db.exec(
@@ -63,7 +67,7 @@ pub fn ingestPackage(ctx: Ctx, db: store.StoreConn, reader: *archive.Reader, id:
                 , .{ id, result.path, result.hash, result.mode });
             },
             .link => {
-                const hash = hashes.get(result.links_to.?) orelse error.UnresolvedLink;
+                const hash = hashes.get(result.links_to.?) orelse return error.UnresolvedLink;
                 try db.exec(
                     \\INSERT INTO files(package_id, path, hash, target, mode)
                     \\VALUES (?,?,?,NULL,?)
@@ -76,10 +80,11 @@ pub fn ingestPackage(ctx: Ctx, db: store.StoreConn, reader: *archive.Reader, id:
                 , .{ id, result.path, result.target, result.mode });
             },
             .dir => {},
+            else => unreachable,
         }
-    }
 
-    try db.commit();
+        try db.execNoArgs("RELEASE ingest");
+    }
 }
 
 fn ingestEntry(ctx: Ctx, reader: *archive.Reader, entry: *archive.c.archive_entry) !IngestResult {
