@@ -8,6 +8,7 @@ pub const Field = enum {
     name,
     version,
     arch,
+    checksum,
     licenses,
     replaces,
     conflicts,
@@ -21,6 +22,7 @@ pub const Field = enum {
         if (std.mem.eql(u8, name, "NAME")) return .name;
         if (std.mem.eql(u8, name, "VERSION")) return .version;
         if (std.mem.eql(u8, name, "ARCH")) return .arch;
+        if (std.mem.eql(u8, name, "SHA256SUM")) return .checksum;
         if (std.mem.eql(u8, name, "LICENSE")) return .licenses;
         if (std.mem.eql(u8, name, "REPLACES")) return .replaces;
         if (std.mem.eql(u8, name, "CONFLICTS")) return .conflicts;
@@ -42,7 +44,7 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
         .version = &.{},
         .release = null,
         .arch = &.{},
-        .kind = .Binary,
+        .checksum = null,
         .licenses = &.{},
         .replaces = &.{},
         .conflicts = &.{},
@@ -94,8 +96,12 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
                 pkg.version = try alloc.dupe(u8, evr.version);
                 pkg.release = if (evr.release) |r| try alloc.dupe(u8, r) else null;
             },
-
             .arch => pkg.arch = try alloc.dupe(u8, trimmed),
+            .checksum => {
+                var decoded: [32]u8 = undefined;
+                _ = try std.fmt.hexToBytes(&decoded, trimmed);
+                pkg.checksum = decoded;
+            },
 
             .licenses => try licenses.append(
                 alloc,
