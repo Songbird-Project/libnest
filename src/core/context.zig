@@ -1,4 +1,7 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const RepoConn = @import("./repo.zig").RepoConn;
 const config = @import("config.zig").config;
 
 pub const LogLevel = enum(u8) { Debug, Info, Warn, Error, Fatal };
@@ -23,10 +26,27 @@ pub const Context = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
 
+    repos: std.StringHashMap(RepoConn),
+
     log_options: LogOptions = .{},
     path_options: PathOptions = .{},
 
     log_cb: *const fn (std.Io, LogLevel, []const u8) void = defaultLogCb,
+
+    pub fn init(alloc: Allocator, io: Io) Context {
+        return .{
+            .io = io,
+            .alloc = alloc,
+
+            .repos = .init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *Context) void {
+        var it = self.repos.valueIterator();
+        while (it.next()) |conn| conn.deinit(self);
+        self.repos.deinit();
+    }
 
     pub fn log(
         self: Context,
