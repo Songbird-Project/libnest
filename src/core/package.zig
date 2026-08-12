@@ -1,6 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mem = @import("../utils/mem.zig");
+const RepoConn = @import("repo.zig").RepoConn;
+
+pub const Provider = struct {
+    info: PackageInfo,
+    conn: RepoConn,
+    id: i64,
+};
 
 pub const PackageInfo = struct {
     name: []const u8,
