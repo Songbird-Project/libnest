@@ -1,7 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 const r = @import("repo.zig");
-const Conn = r.RepoConn;
+const RepoConn = r.RepoConn;
+const StoreConn = @import("../store/store.zig").StoreConn;
 const download = @import("../net/download.zig");
 const Ctx = @import("context.zig").Context;
 const zqlite = @import("zqlite");
@@ -17,7 +18,7 @@ pub fn syncAllRepos(ctx: Ctx) !void {
     }
 }
 
-pub fn syncRepo(ctx: Ctx, conn: Conn) !void {
+pub fn syncRepo(ctx: Ctx, conn: RepoConn) !void {
     const repo = conn.repo;
 
     var client = try download.CurlClient.init(ctx);
@@ -41,42 +42,16 @@ pub fn syncRepo(ctx: Ctx, conn: Conn) !void {
         try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     }
 
-    for (repo.mirrors) |mirror| {
-        const repo_url = try std.mem.replaceOwned(
-            u8,
-            ctx.alloc,
-            mirror,
-            "$repo",
-            repo.name,
-        );
-        defer ctx.alloc.free(repo_url);
-
-        const resolved_url = try std.mem.replaceOwned(
-            u8,
-            ctx.alloc,
-            repo_url,
-            "$arch",
-            repo.arch,
-        );
-        defer ctx.alloc.free(resolved_url);
-
-        const url = try std.fmt.allocPrint(
-            ctx.alloc,
-            "{s}/{s}.db",
-            .{ resolved_url, repo.name },
-        );
-        defer ctx.alloc.free(url);
-
-        client.downloadToFile(ctx, url, dest) catch {
-            try ctx.log(
-                .Error,
-                "Failed to download repo file for '{s}' from mirror '{s}'\n",
-                .{ repo.name, url },
-            );
-            continue;
-        };
-        break;
-    }
+    var db_name_buf: [128]u8 = undefined;
+    const db_filename = try std.fmt.bufPrint(
+        &db_name_buf,
+        "{s}.db",
+        .{repo.name},
+    );
+    client.downloadFromMirror(ctx, conn, db_filename, dest) catch |err| switch (err) {
+        error.AllMirrorsFailed => {},
+        else => return err,
+    };
 
     var reader = try archive.Reader.init();
     defer reader.deinit();
@@ -156,38 +131,7 @@ pub fn syncRepo(ctx: Ctx, conn: Conn) !void {
 
         if (row) {
             const id = sync_stmt.int(0);
-
-            try conn.conn.exec("DELETE FROM depends WHERE package_id = ?1;", .{id});
-            try conn.conn.exec("DELETE FROM provides WHERE package_id = ?1;", .{id});
-            try conn.conn.exec("DELETE FROM conflicts WHERE package_id = ?1;", .{id});
-            try conn.conn.exec("DELETE FROM replaces WHERE package_id = ?1;", .{id});
-            try conn.conn.exec("DELETE FROM licenses WHERE package_id = ?1;", .{id});
-            for (pkg_info.deps) |dep| {
-                try conn.conn.exec(
-                    \\INSERT INTO depends(package_id, name, kind, ver_constraint) VALUES (?1, ?2, ?3, ?4)
-                , .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
-            }
-            for (pkg_info.provides) |provide| {
-                try conn.conn.exec(
-                    \\INSERT INTO provides(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
-                , .{ id, provide.name, provide.constraint });
-            }
-
-            for (pkg_info.conflicts) |confs| {
-                try conn.conn.exec(
-                    \\INSERT INTO conflicts(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
-                , .{ id, confs.name, confs.constraint });
-            }
-            for (pkg_info.replaces) |reps| {
-                try conn.conn.exec(
-                    \\INSERT INTO replaces(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
-                , .{ id, reps.name, reps.constraint });
-            }
-            for (pkg_info.licenses) |name| {
-                try conn.conn.exec(
-                    \\INSERT INTO licenses(package_id, name) VALUES (?1, ?2)
-                , .{ id, name });
-            }
+            try persistRelations(conn.conn, id, pkg_info);
         }
 
         try sync_stmt.reset();
@@ -196,60 +140,40 @@ pub fn syncRepo(ctx: Ctx, conn: Conn) !void {
     try conn.conn.commit();
 }
 
-pub fn syncPkg(ctx: Ctx, conn: Conn, name: []const u8) !void {
-    const repo = conn.repo;
-
+pub fn syncPkg(ctx: Ctx, store_conn: StoreConn, name: []const u8) !void {
     var client = try download.CurlClient.init(ctx);
     defer client.deinit(ctx);
 
-    const pkg = try conn.getPkg(ctx, name);
-    const id = (try conn.conn.row("SELECT id from packages WHERE name = ?1", .{name})).?.int(0);
+    const provider = r.getProvider(ctx, name) catch |err| switch (err) {
+        error.ProviderNotFound => {
+            try ctx.log(.Error, "Failed to find provider for '{s}'\n", .{name});
+            return error.ProviderNotFound;
+        },
+        else => return err,
+    };
 
-    const pkg_name = try resolvePkgFilename(ctx, pkg);
-    defer ctx.alloc.free(pkg_name);
+    const id = provider.id;
+    const repo = provider.conn;
+    var pkg = provider.info;
+    defer pkg.deinit(ctx.alloc);
+
+    const pkg_filename = try resolvePkgFilename(ctx, pkg);
+    defer ctx.alloc.free(pkg_filename);
     const dest = try Io.Dir.path.join(ctx.alloc, &.{
+        ctx.path_options.root,
         ctx.path_options.cache,
         "pkgs",
-        pkg_name,
+        pkg_filename,
     });
-    defer ctx.alloc.free(dest);
 
-    for (repo.mirrors) |mirror| {
-        const repo_url = try std.mem.replaceOwned(
-            u8,
-            ctx.alloc,
-            mirror,
-            "$repo",
-            repo.name,
-        );
-        defer ctx.alloc.free(repo_url);
-
-        const resolved_url = try std.mem.replaceOwned(
-            u8,
-            ctx.alloc,
-            repo_url,
-            "$arch",
-            repo.arch,
-        );
-        defer ctx.alloc.free(resolved_url);
-
-        const url = try std.fmt.allocPrint(
-            ctx.alloc,
-            "{s}/{s}",
-            .{ resolved_url, pkg_name },
-        );
-        defer ctx.alloc.free(url);
-
-        client.downloadToFile(ctx, url, dest) catch {
-            try ctx.log(
-                .Error,
-                "Failed to download repo file for '{s}' from mirror '{s}'\n",
-                .{ repo.name, url },
-            );
-            continue;
-        };
-        break;
+    if (std.Io.Dir.path.dirname(dest)) |dir| {
+        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     }
+
+    client.downloadFromMirror(ctx, repo, pkg_filename, dest) catch |err| switch (err) {
+        error.AllMirrorsFailed => {},
+        else => return err,
+    };
 
     var reader = try archive.Reader.init();
     defer reader.deinit();
@@ -263,7 +187,7 @@ pub fn syncPkg(ctx: Ctx, conn: Conn, name: []const u8) !void {
             try ctx.log(
                 .Error,
                 "Failed to download package archive for '{s}'\n",
-                .{repo.name},
+                .{name},
             );
             return err;
         },
@@ -291,44 +215,47 @@ pub fn syncPkg(ctx: Ctx, conn: Conn, name: []const u8) !void {
     file_reader.seekTo(0);
     try reader.openFd(file.handle);
 
-    try conn.conn.transaction();
-    errdefer conn.conn.rollback();
+    try store_conn.transaction();
+    errdefer store_conn.rollback();
 
-    try ingest.ingestPackage(ctx, conn, reader, id);
+    try ingest.ingestPackage(ctx, store_conn, reader, id);
+    try persistRelations(store_conn, id, pkg);
 
-    try conn.conn.exec("DELETE FROM depends WHERE package_id = ?1;", .{id});
-    try conn.conn.exec("DELETE FROM provides WHERE package_id = ?1;", .{id});
-    try conn.conn.exec("DELETE FROM conflicts WHERE package_id = ?1;", .{id});
-    try conn.conn.exec("DELETE FROM replaces WHERE package_id = ?1;", .{id});
-    try conn.conn.exec("DELETE FROM licenses WHERE package_id = ?1;", .{id});
-    for (pkg.deps) |dep| {
-        try conn.conn.exec(
+    try store_conn.commit();
+}
+
+fn persistRelations(conn: zqlite.Conn, id: i64, pkg_info: package.PackageInfo) !void {
+    try conn.exec("DELETE FROM depends WHERE package_id = ?1;", .{id});
+    try conn.exec("DELETE FROM provides WHERE package_id = ?1;", .{id});
+    try conn.exec("DELETE FROM conflicts WHERE package_id = ?1;", .{id});
+    try conn.exec("DELETE FROM replaces WHERE package_id = ?1;", .{id});
+    try conn.exec("DELETE FROM licenses WHERE package_id = ?1;", .{id});
+    for (pkg_info.deps) |dep| {
+        try conn.exec(
             \\INSERT INTO depends(package_id, name, kind, ver_constraint) VALUES (?1, ?2, ?3, ?4)
         , .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
     }
-    for (pkg.provides) |provide| {
-        try conn.conn.exec(
+    for (pkg_info.provides) |provide| {
+        try conn.exec(
             \\INSERT INTO provides(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
         , .{ id, provide.name, provide.constraint });
     }
 
-    for (pkg.conflicts) |confs| {
-        try conn.conn.exec(
+    for (pkg_info.conflicts) |confs| {
+        try conn.exec(
             \\INSERT INTO conflicts(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
         , .{ id, confs.name, confs.constraint });
     }
-    for (pkg.replaces) |reps| {
-        try conn.conn.exec(
+    for (pkg_info.replaces) |reps| {
+        try conn.exec(
             \\INSERT INTO replaces(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
         , .{ id, reps.name, reps.constraint });
     }
-    for (pkg.licenses) |license| {
-        try conn.conn.exec(
+    for (pkg_info.licenses) |license| {
+        try conn.exec(
             \\INSERT INTO licenses(package_id, name) VALUES (?1, ?2)
         , .{ id, license });
     }
-
-    try conn.conn.commit();
 }
 
 fn resolvePkgFilename(ctx: Ctx, pkg: package.PackageInfo) ![]const u8 {
