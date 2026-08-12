@@ -12,6 +12,8 @@ pub const LogOptions = struct {
     warn_prefix: []const u8 = "\x1B[0;34m[\x1B[0;33mW\x1B[0;34m]\x1B[0m ",
     error_prefix: []const u8 = "\x1B[0;34m[\x1B[0;31mE\x1B[0;34m]\x1B[0m ",
     fatal_prefix: []const u8 = "\x1B[0;34m[\x1B[0;35mF\x1B[0;34m]\x1B[0m ",
+
+    minimum_log_level: LogLevel = .Info,
 };
 
 pub const PathOptions = struct {
@@ -45,7 +47,7 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         var it = self.repos.valueIterator();
-        while (it.next()) |conn| conn.deinit(self);
+        while (it.next()) |conn| conn.deinit(self.*);
         self.repos.deinit();
     }
 
@@ -55,6 +57,8 @@ pub const Context = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) !void {
+        if (@intFromEnum(level) < @intFromEnum(self.log_options.minimum_log_level)) return;
+
         const prefix = switch (level) {
             .Debug => self.log_options.debug_prefix,
             .Info => self.log_options.info_prefix,
@@ -103,10 +107,10 @@ fn defaultSelectCb(io: Io, items: usize) !usize {
     var input = Io.Writer.fixed(&buf);
 
     while (true) {
-        try w.print("Select [1-{d}]: ", .{ 1, items });
+        try w.print("Select [1-{d}]: ", .{items});
 
         _ = try stdin.streamDelimiter(&input, '\n');
-        const trimmed = std.mem.trim(u8, &input.buffered(), " \t\r\n");
+        const trimmed = std.mem.trim(u8, input.buffered(), " \t\r\n");
 
         const val = std.fmt.parseInt(usize, trimmed, 10) catch continue;
 
