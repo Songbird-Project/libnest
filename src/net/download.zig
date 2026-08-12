@@ -1,14 +1,15 @@
 const std = @import("std");
 const curl = @import("curl");
 
+const RepoConn = @import("../core/repo.zig").RepoConn;
 const context = @import("../core/context.zig");
-const Context = context.Context;
+const Ctx = context.Context;
 
 pub const CurlClient = struct {
     easy: *curl.Easy,
     ca_bundle: std.array_list.Aligned(u8, null),
 
-    pub fn init(ctx: Context) !CurlClient {
+    pub fn init(ctx: Ctx) !CurlClient {
         var ca_bundle = try curl.allocCABundle(ctx.alloc, ctx.io);
         errdefer ca_bundle.deinit(ctx.alloc);
 
@@ -24,15 +25,15 @@ pub const CurlClient = struct {
         };
     }
 
-    pub fn deinit(self: *CurlClient, ctx: Context) void {
+    pub fn deinit(self: *CurlClient, ctx: Ctx) void {
         self.easy.deinit();
         ctx.alloc.destroy(self.easy);
         self.ca_bundle.deinit(ctx.alloc);
     }
 
-    pub fn downloadToFile(
+    pub fn download(
         self: CurlClient,
-        ctx: Context,
+        ctx: Ctx,
         url: []const u8,
         dest: []const u8,
     ) !void {
@@ -59,5 +60,53 @@ pub const CurlClient = struct {
             }
             return error.DownloadFailed;
         }
+    }
+
+    pub fn downloadFromMirror(
+        self: CurlClient,
+        ctx: Ctx,
+        repo_conn: RepoConn,
+        filename: []const u8,
+        dest: []const u8,
+    ) !void {
+        const repo = repo_conn.repo;
+        for (repo.mirrors) |mirror| {
+            const repo_url = try std.mem.replaceOwned(
+                u8,
+                ctx.alloc,
+                mirror,
+                "$repo",
+                repo.name,
+            );
+            defer ctx.alloc.free(repo_url);
+
+            const resolved_url = try std.mem.replaceOwned(
+                u8,
+                ctx.alloc,
+                repo_url,
+                "$arch",
+                repo.arch,
+            );
+            defer ctx.alloc.free(resolved_url);
+
+            const url = try std.fmt.allocPrint(
+                ctx.alloc,
+                "{s}/{s}",
+                .{ resolved_url, filename },
+            );
+            defer ctx.alloc.free(url);
+
+            self.download(ctx, url, dest) catch {
+                try ctx.log(
+                    .Error,
+                    "Failed to download repo file for '{s}' from mirror '{s}'\n",
+                    .{ repo.name, url },
+                );
+                continue;
+            };
+            return;
+        }
+
+        return error.AllMirrorsFailed;
     }
 };
