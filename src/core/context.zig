@@ -23,7 +23,7 @@ pub const PathOptions = struct {
 };
 
 pub const Context = struct {
-    io: std.Io,
+    io: Io,
     alloc: std.mem.Allocator,
 
     repos: std.StringHashMap(RepoConn),
@@ -31,7 +31,8 @@ pub const Context = struct {
     log_options: LogOptions = .{},
     path_options: PathOptions = .{},
 
-    log_cb: *const fn (std.Io, LogLevel, []const u8) void = defaultLogCb,
+    log_cb: *const fn (Io, LogLevel, []const u8) anyerror!void = defaultLogCb,
+    select_cb: *const fn (Io, usize) anyerror!usize = defaultSelectCb,
 
     pub fn init(alloc: Allocator, io: Io) Context {
         return .{
@@ -65,18 +66,52 @@ pub const Context = struct {
         const msg = try std.fmt.allocPrint(self.alloc, "{s}" ++ fmt, .{prefix} ++ args);
         defer self.alloc.free(msg);
 
-        self.log_cb(self.io, level, msg);
+        try self.log_cb(self.io, level, msg);
+    }
+
+    pub fn select(self: Context, items: usize) !usize {
+        return try self.select_cb(self.io, items);
     }
 };
 
-fn defaultLogCb(io: std.Io, level: LogLevel, msg: []const u8) void {
+fn defaultLogCb(io: Io, level: LogLevel, msg: []const u8) !void {
     var buf: [256]u8 = undefined;
     const file = switch (level) {
-        .Fatal, .Error, .Warn => std.Io.File.stderr(),
-        .Info, .Debug => std.Io.File.stdout(),
+        .Fatal, .Error, .Warn => Io.File.stderr(),
+        .Info, .Debug => Io.File.stdout(),
     };
 
     var writer = file.writer(io, &buf);
-    writer.interface.writeAll(msg) catch {};
-    writer.interface.flush() catch {};
+    const w = &writer.interface;
+    try w.writeAll(msg);
+    try w.flush();
+}
+
+fn defaultSelectCb(io: Io, items: usize) !usize {
+    var stdin_buf: [16]u8 = undefined;
+    const stdin_file = Io.File.stdin();
+
+    var stdin_reader = stdin_file.reader(io, &stdin_buf);
+    const stdin = &stdin_reader.interface;
+
+    var stdout_buf: [256]u8 = undefined;
+    const file = Io.File.stdout();
+    var writer = file.writer(io, &stdout_buf);
+    const w = &writer.interface;
+
+    var buf: [16]u8 = undefined;
+    var input = Io.Writer.fixed(&buf);
+
+    while (true) {
+        try w.print("Select [1-{d}]: ", .{ 1, items });
+
+        _ = try stdin.streamDelimiter(&input, '\n');
+        const trimmed = std.mem.trim(u8, &input.buffered(), " \t\r\n");
+
+        const val = std.fmt.parseInt(usize, trimmed, 10) catch continue;
+
+        if (val <= 0 or val > items) continue;
+
+        return val - 1;
+    }
 }
