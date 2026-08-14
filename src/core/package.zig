@@ -48,14 +48,6 @@ pub const PackageInfo = struct {
     }
 };
 
-// The DB handles tracking files and blobs
-// pub const PackageOutput = struct {
-//     // hash of the output file
-//     hash: [32]u8,
-//     path: []const u8,
-//     created: std.Io.Timestamp,
-// };
-
 pub const DepKind = enum(u8) {
     Run,
     Make,
