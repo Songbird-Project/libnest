@@ -23,7 +23,7 @@ pub fn getId(ctx: Context, store_db: StoreConn, name: []const u8) !i64 {
         return r.int(0);
     }
 
-    ctx.log(.Error, "Couldn't find profile: '{s}'", .{name});
+    try ctx.log(.Error, "Couldn't find profile: '{s}'", .{name});
     return error.ProfileNotFound;
 }
 
@@ -35,6 +35,6 @@ pub fn getName(ctx: Context, store_db: StoreConn, id: i64) ![]const u8 {
         return try ctx.alloc.dupe(u8, r.cString(1));
     }
 
-    ctx.log(.Error, "Couldn't find profile with id: '{d}'", .{id});
+    try ctx.log(.Error, "Couldn't find profile with id: '{d}'", .{id});
     return error.ProfileNotFound;
 }
