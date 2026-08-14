@@ -173,7 +173,7 @@ pub fn activate(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
         else => return err,
     };
 
-    try store_conn.exec("UPDATE profiles SET generation = ?1 WHERE name = ?2", .{ gen_id, profile_name });
+    try store_conn.exec("UPDATE profiles SET generation = ?1 WHERE id = ?2", .{ gen.number, gen.profile });
     try Io.Dir.cwd().symLink(ctx.io, gen_dir, tmp, .{ .is_directory = true });
     try Io.Dir.cwd().rename(tmp, .cwd(), current, ctx.io);
 }
