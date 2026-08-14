@@ -40,7 +40,7 @@ pub const IngestResult = struct {
     }
 };
 
-/// ingestPackage requires that a transaction is already active
+/// `ingestPackage` requires that a valid transaction is already active
 pub fn ingestPackage(ctx: Ctx, db: store.StoreConn, reader: *archive.Reader, id: i64) !void {
     var hashes: std.StringHashMap([32]u8) = .init(ctx.alloc);
     defer hashes.deinit();
