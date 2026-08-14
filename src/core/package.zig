@@ -4,9 +4,14 @@ const mem = @import("../utils/mem.zig");
 const RepoConn = @import("repo.zig").RepoConn;
 
 pub const Provider = struct {
-    info: PackageInfo,
+    info: *PackageInfo,
     conn: RepoConn,
     id: i64,
+
+    pub fn deinit(self: Provider, alloc: Allocator) void {
+        self.info.deinit(alloc);
+        alloc.destroy(self.info);
+    }
 };
 
 pub const PackageInfo = struct {
@@ -16,6 +21,7 @@ pub const PackageInfo = struct {
     release: ?[]const u8 = null,
     arch: []const u8,
     repo: []const u8,
+    explicit: bool = true,
     checksum: ?[32]u8 = null,
     deps: []Dependency = &.{},
     licenses: []const []const u8 = &.{},
