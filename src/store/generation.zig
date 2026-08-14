@@ -178,7 +178,22 @@ pub fn activate(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
     try Io.Dir.cwd().rename(tmp, .cwd(), current, ctx.io);
 }
 
-pub fn protect(store_conn: StoreConn, gen_id: i64, protected: bool) !void {
+pub fn protect(ctx: Context, store_conn: StoreConn, gen_id: i64, protected: bool) !void {
+    const gen = try getNumber(store_conn, gen_id);
+    const current_gen_row = try store_conn.row("SELECT generation FROM profiles WHERE id = ?1", .{gen.profile});
+    defer current_gen_row.?.deinit();
+
+    const profile_name = try profile.getName(ctx, store_conn, gen.profile);
+    defer ctx.alloc.free(profile_name);
+
+    if (protected and current_gen_row.?.int(0) == gen.number) {
+        try ctx.log(
+            .Warn,
+            "Generation {d} in '{s}' is currently active, protection will have no effect until a new generation is activated\n",
+            .{ gen.number, profile_name },
+        );
+    }
+
     try store_conn.exec("UPDATE generations SET protected = ?1 WHERE id = ?2", .{
         @intFromBool(protected),
         gen_id,
