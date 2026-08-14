@@ -17,7 +17,6 @@ pub const Internal = struct {
         // pub const pkgbuild = @import("parse/pkgbuild.zig");
     };
 
-    pub const git = @import("utils/git.zig");
     pub const archive = @import("utils/archive.zig");
     pub const mem = @import("utils/mem.zig");
     pub const version = @import("utils/version.zig");
