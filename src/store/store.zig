@@ -154,7 +154,7 @@ pub fn newConn(ctx: Context) !StoreConn {
         \\  profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
         \\  number INTEGER NOT NULL,
         \\  created INTEGER NOT NULL,
-        \\  protected INTEGER NOT NULL DEFAULT 0 CHECK(protected IN (0, 1))
+        \\  protected INTEGER NOT NULL DEFAULT 0 CHECK(protected IN (0, 1)),
         \\  UNIQUE(profile_id, number)
         \\);
         \\
