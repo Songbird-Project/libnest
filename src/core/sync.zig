@@ -137,6 +137,8 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
         try sync_stmt.reset();
         try conn.conn.execNoArgs("RELEASE pkg");
     }
+
+    try conn.conn.execNoArgs("UPDATE metadata SET last_refresh = unixepoch()");
     try conn.conn.commit();
 }
 
@@ -163,6 +165,7 @@ pub fn syncPackage(ctx: Context, store_conn: StoreConn, provider: package.Provid
         "pkgs",
         pkg_filename,
     });
+    defer ctx.alloc.free(dest);
 
     if (std.Io.Dir.path.dirname(dest)) |dir| {
         try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
