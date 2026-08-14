@@ -140,22 +140,20 @@ pub fn syncRepo(ctx: Ctx, conn: RepoConn) !void {
     try conn.conn.commit();
 }
 
-pub fn syncPkg(ctx: Ctx, store_conn: StoreConn, name: []const u8) !void {
+pub fn syncPackages(ctx: Ctx, store_conn: StoreConn, providers: []package.Provider) !void {
+    try store_conn.transaction();
+    errdefer store_conn.rollback();
+    for (providers) |provider| try syncPackage(ctx, store_conn, provider);
+    try store_conn.commit();
+}
+
+/// `syncPackage` requires that a valid transaction is already active
+pub fn syncPackage(ctx: Ctx, store_conn: StoreConn, provider: package.Provider) !void {
     var client = try download.CurlClient.init(ctx);
     defer client.deinit(ctx);
 
-    const provider = r.getProvider(ctx, name) catch |err| switch (err) {
-        error.ProviderNotFound => {
-            try ctx.log(.Error, "Failed to find provider for '{s}'\n", .{name});
-            return error.ProviderNotFound;
-        },
-        else => return err,
-    };
-
-    const id = provider.id;
     const repo = provider.conn;
     var pkg = provider.info;
-    defer pkg.deinit(ctx.alloc);
 
     const pkg_filename = try resolvePkgFilename(ctx, pkg);
     defer ctx.alloc.free(pkg_filename);
@@ -187,7 +185,7 @@ pub fn syncPkg(ctx: Ctx, store_conn: StoreConn, name: []const u8) !void {
             try ctx.log(
                 .Error,
                 "Failed to download package archive for '{s}'\n",
-                .{name},
+                .{provider.info.name},
             );
             return err;
         },
@@ -215,13 +213,39 @@ pub fn syncPkg(ctx: Ctx, store_conn: StoreConn, name: []const u8) !void {
     file_reader.seekTo(0);
     try reader.openFd(file.handle);
 
-    try store_conn.transaction();
-    errdefer store_conn.rollback();
+    try store_conn.execNoArgs("SAVEPOINT ingest");
+    errdefer store_conn.execNoArgs("ROLLBACK TO ingest") catch {};
 
-    try ingest.ingestPackage(ctx, store_conn, reader, id);
-    try persistRelations(store_conn, id, pkg);
+    const existing = try store_conn.row("SELECT explicit FROM packages WHERE name = ?1", .{pkg.name});
+    if (existing) |er| {
+        defer er.deinit();
+        pkg.explicit = if (er.int(0) != 0) true else pkg.explicit;
+    }
 
-    try store_conn.commit();
+    const sr = try store_conn.row(
+        \\INSERT INTO packages(name, epoch, version, release, explicit, arch, repo)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        \\ON CONFLICT(name) DO UPDATE SET
+        \\  epoch = excluded.epoch,
+        \\  version = excluded.version,
+        \\  release = excluded.release,
+        \\  explicit = excluded.explicit
+        \\RETURNING id;
+    , .{
+        pkg.name,
+        pkg.epoch,
+        pkg.version,
+        pkg.release,
+        pkg.explicit,
+        pkg.arch,
+        pkg.repo,
+    });
+    defer sr.?.deinit();
+    const store_id = sr.?.int(0);
+    try ingest.ingestPackage(ctx, store_conn, reader, store_id);
+    try persistRelations(store_conn, store_id, pkg);
+
+    try store_conn.execNoArgs("RELEASE ingest");
 }
 
 fn persistRelations(conn: zqlite.Conn, id: i64, pkg_info: package.PackageInfo) !void {
