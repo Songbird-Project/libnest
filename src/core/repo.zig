@@ -6,6 +6,13 @@ const package = @import("package.zig");
 const version = @import("../utils/version.zig");
 const mem = @import("../utils/mem.zig");
 
+const comps: std.StaticStringMap(u8) = .initComptime(.{
+    .{ ">", 0 },
+    .{ "<", 1 },
+    .{ ">=", 2 },
+    .{ "<=", 3 },
+});
+
 pub const Repo = struct {
     name: []const u8,
     arch: []const u8,
@@ -131,8 +138,8 @@ pub const RepoConn = struct {
     }
 };
 
-pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
-    var providers: std.ArrayList(struct { conn: RepoConn, name: []const u8, id: i64 }) = .empty;
+pub fn getProvider(ctx: Ctx, name: []const u8, explicit: bool) !package.Provider {
+    var providers: std.ArrayList(struct { conn: *RepoConn, name: []const u8, id: i64 }) = .empty;
     defer {
         for (providers.items) |item| ctx.alloc.free(item.name);
         providers.deinit(ctx.alloc);
@@ -140,28 +147,52 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
 
     var repo_it = ctx.repos.valueIterator();
     while (repo_it.next()) |repo| {
-        const provider_rows = try repo.conn.rows("SELECT name,id from packages WHERE name = ?1", .{name});
-        defer provider_rows.deinit();
-        while (provider_rows.next()) |r| {
+        const pkg_row = try repo.conn.row("SELECT name,id FROM packages WHERE name = ?1", .{name});
+        if (pkg_row) |r| {
+            defer r.deinit();
             try providers.append(ctx.alloc, .{
-                .conn = repo.*,
+                .conn = repo,
                 .name = try ctx.alloc.dupe(u8, r.cString(0)),
                 .id = r.int(1),
             });
+        }
+
+        const provider_rows = try repo.conn.rows("SELECT package_id FROM provides WHERE name = ?1", .{name});
+        defer provider_rows.deinit();
+
+        blk: while (provider_rows.next()) |r| {
+            for (providers.items) |p| {
+                if (p.id == r.int(0)) continue :blk;
+            }
+
+            defer r.deinit();
+            const p = try repo.conn.row("SELECT name FROM packages WHERE id = ?1", .{r.int(0)});
+            if (p) |pr| {
+                defer pr.deinit();
+                try providers.append(ctx.alloc, .{
+                    .conn = repo,
+                    .name = try ctx.alloc.dupe(u8, pr.cString(0)),
+                    .id = r.int(0),
+                });
+            }
         }
     }
 
     if (providers.items.len == 0) return error.ProviderNotFound;
 
+    for (providers.items, 1..) |pkg, idx| {
+        try ctx.log(.None, "{d:>3}: {s}", .{ idx, pkg.name });
+    }
     const selected = if (providers.items.len == 1) 0 else try ctx.select(providers.items.len);
     const provider = providers.items[selected];
 
-    var row = (try provider.conn.conn.row("SELECT * from packages WHERE id = ?1", .{provider.id})).?;
+    var row = (try provider.conn.conn.row("SELECT * FROM packages WHERE id = ?1", .{provider.id})).?;
     defer row.deinit();
     const conn = provider.conn.conn;
 
     const id = row.int(0);
-    var pkg: package.PackageInfo = .{
+    const pkg = try ctx.alloc.create(package.PackageInfo);
+    pkg.* = .{
         .name = try ctx.alloc.dupe(u8, row.cString(1)),
         .arch = try ctx.alloc.dupe(u8, provider.conn.repo.arch),
         .checksum = row.get(?[32]u8, 2),
@@ -169,6 +200,7 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
         .epoch = @intCast(row.int(3)),
         .version = try ctx.alloc.dupe(u8, row.cString(4)),
         .release = if (row.get(?[]const u8, 5)) |sum| try ctx.alloc.dupe(u8, sum) else null,
+        .explicit = explicit,
     };
 
     var depends: std.ArrayList(package.DepKind) = .empty;
@@ -176,7 +208,7 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
         for (depends.items) |dep| dep.deinit(ctx.alloc);
         depends.deinit(ctx.alloc);
     }
-    const depend_rows = try conn.rows("SELECT * from depends WHERE package_id = ?1", .{id});
+    const depend_rows = try conn.rows("SELECT * FROM depends WHERE package_id = ?1", .{id});
     while (depend_rows.next()) |dep| {
         try depends.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, dep.cString(1)),
@@ -201,7 +233,7 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
         for (provides.items) |constraint| constraint.deinit(ctx.alloc);
         provides.deinit(ctx.alloc);
     }
-    const provide_rows = try conn.rows("SELECT * from provides WHERE package_id = ?1", .{id});
+    const provide_rows = try conn.rows("SELECT * FROM provides WHERE package_id = ?1", .{id});
     while (provide_rows.next()) |r| {
         try provides.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, r.cString(1)),
@@ -216,7 +248,7 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
         for (conflicts.items) |constraint| constraint.deinit(ctx.alloc);
         conflicts.deinit(ctx.alloc);
     }
-    const conflict_rows = try conn.rows("SELECT * from conflicts WHERE package_id = ?1", .{id});
+    const conflict_rows = try conn.rows("SELECT * FROM conflicts WHERE package_id = ?1", .{id});
     while (conflict_rows.next()) |r| {
         try conflicts.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, r.cString(1)),
@@ -231,7 +263,7 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
         for (replaces.items) |constraint| constraint.deinit(ctx.alloc);
         replaces.deinit(ctx.alloc);
     }
-    const replace_rows = try conn.rows("SELECT * from replaces WHERE package_id = ?1", .{id});
+    const replace_rows = try conn.rows("SELECT * FROM replaces WHERE package_id = ?1", .{id});
     while (replace_rows.next()) |r| {
         try replaces.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, r.cString(1)),
@@ -246,7 +278,7 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
         for (licenses.items) |license| ctx.alloc.free(license);
         licenses.deinit(ctx.alloc);
     }
-    const license_rows = try conn.rows("SELECT * from licenses WHERE package_id = ?1", .{id});
+    const license_rows = try conn.rows("SELECT * FROM licenses WHERE package_id = ?1", .{id});
     while (license_rows.next()) |r| {
         try licenses.append(
             ctx.alloc,
@@ -255,5 +287,94 @@ pub fn getProvider(ctx: Ctx, name: []const u8) !package.Provider {
     }
     pkg.licenses = try licenses.toOwnedSlice(ctx.alloc);
 
-    return .{ .info = pkg, .conn = provider.conn, .id = id };
+    return .{ .info = pkg, .conn = provider.conn.*, .id = id };
+}
+
+pub fn getProviderWithDeps(ctx: Ctx, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
+    var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
+    defer {
+        var it = seen.valueIterator();
+        while (it.next()) |n| ctx.alloc.free(n.*);
+        seen.deinit();
+    }
+
+    return try getProviderWithDepsRecursive(ctx, name, true, &seen, constraint);
+}
+
+fn getProviderWithDepsRecursive(
+    ctx: Ctx,
+    name: []const u8,
+    first: bool,
+    seen: *std.AutoHashMap(i64, []const u8),
+    constraint: ?[]const u8,
+) ![]package.Provider {
+    const current = try getProvider(ctx, name, first);
+    errdefer current.deinit(ctx.alloc);
+
+    if (seen.get(current.id)) |existing| {
+        if (constraint) |c| {
+            if (!try satisfiesConstraint(existing, c))
+                return error.ConflictingDependencies;
+        }
+
+        current.deinit(ctx.alloc);
+        return &.{};
+    }
+
+    if (constraint) |c| {
+        if (!try satisfiesConstraint(current.info.version, c))
+            return error.ConflictingDependencies;
+    }
+
+    const current_version = try ctx.alloc.dupe(u8, current.info.version);
+    errdefer ctx.alloc.free(current_version);
+    try seen.put(current.id, current_version);
+
+    var providers: std.ArrayList(package.Provider) = .empty;
+    errdefer {
+        for (providers.items) |provider| provider.deinit(ctx.alloc);
+        providers.deinit(ctx.alloc);
+    }
+
+    try providers.append(ctx.alloc, current);
+    for (current.info.deps) |dep| {
+        const children = try getProviderWithDepsRecursive(
+            ctx,
+            dep.name,
+            false,
+            seen,
+            dep.constraint,
+        );
+        defer ctx.alloc.free(children);
+        try providers.appendSlice(ctx.alloc, children);
+    }
+
+    return try providers.toOwnedSlice(ctx.alloc);
+}
+
+fn satisfiesConstraint(local: []const u8, constraint: []const u8) !bool {
+    var comp: u8 = undefined;
+    var op_len: u8 = undefined;
+
+    if (constraint.len >= 2) {
+        if (comps.get(constraint[0..2])) |c| {
+            comp = c;
+            op_len = 2;
+        } else if (comps.get(constraint[0..1])) |c| {
+            comp = c;
+            op_len = 1;
+        } else return error.InvalidDependencyConstraint;
+    } else {
+        comp = comps.get(constraint[0..1]) orelse return error.InvalidDependencyConstraint;
+        op_len = 1;
+    }
+
+    const res = version.cmp(local, constraint[op_len..]);
+    return switch (comp) {
+        0 => res == 1,
+        1 => res == -1,
+        2 => res >= 0,
+        3 => res <= 0,
+        else => unreachable,
+    };
 }
