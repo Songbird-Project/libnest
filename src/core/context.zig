@@ -4,7 +4,7 @@ const Io = std.Io;
 const RepoConn = @import("./repo.zig").RepoConn;
 const config = @import("config.zig").config;
 
-pub const LogLevel = enum(u8) { Debug, Info, Warn, Error, Fatal };
+pub const LogLevel = enum(u8) { Debug, Info, Warn, Error, Fatal, None };
 
 pub const LogOptions = struct {
     debug_prefix: []const u8 = "\x1B[0;34m[\x1B[0;37mD\x1B[0;34m]\x1B[0m ",
@@ -60,6 +60,7 @@ pub const Context = struct {
         if (@intFromEnum(level) < @intFromEnum(self.log_options.minimum_log_level)) return;
 
         const prefix = switch (level) {
+            .None => "",
             .Debug => self.log_options.debug_prefix,
             .Info => self.log_options.info_prefix,
             .Warn => self.log_options.warn_prefix,
@@ -82,7 +83,7 @@ fn defaultLogCb(io: Io, level: LogLevel, msg: []const u8) !void {
     var buf: [256]u8 = undefined;
     const file = switch (level) {
         .Fatal, .Error, .Warn => Io.File.stderr(),
-        .Info, .Debug => Io.File.stdout(),
+        .None, .Info, .Debug => Io.File.stdout(),
     };
 
     var writer = file.writer(io, &buf);
