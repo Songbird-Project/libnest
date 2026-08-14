@@ -2,7 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const context = @import("../core/context.zig");
-const Ctx = context.Context;
+const Context = context.Context;
 const store = @import("./store.zig");
 const archive = @import("../utils/archive.zig");
 
@@ -41,7 +41,7 @@ pub const IngestResult = struct {
 };
 
 /// `ingestPackage` requires that a valid transaction is already active
-pub fn ingestPackage(ctx: Ctx, db: store.StoreConn, reader: *archive.Reader, id: i64) !void {
+pub fn ingestPackage(ctx: Context, db: store.StoreConn, reader: *archive.Reader, id: i64) !void {
     var hashes: std.StringHashMap([32]u8) = .init(ctx.alloc);
     defer hashes.deinit();
 
@@ -87,7 +87,7 @@ pub fn ingestPackage(ctx: Ctx, db: store.StoreConn, reader: *archive.Reader, id:
     }
 }
 
-fn ingestEntry(ctx: Ctx, reader: *archive.Reader, entry: *archive.c.archive_entry) !IngestResult {
+fn ingestEntry(ctx: Context, reader: *archive.Reader, entry: *archive.c.archive_entry) !IngestResult {
     const path = try ctx.alloc.dupe(u8, std.mem.span(archive.c.archive_entry_pathname(entry)));
 
     if (METADATA_FILES.has(Io.Dir.path.basename(path))) return .{

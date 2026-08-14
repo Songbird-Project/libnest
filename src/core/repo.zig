@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zqlite = @import("zqlite");
-const Ctx = @import("context.zig").Context;
+const Context = @import("context.zig").Context;
 const package = @import("package.zig");
 const version = @import("../utils/version.zig");
 const mem = @import("../utils/mem.zig");
@@ -25,7 +25,7 @@ pub const RepoConn = struct {
     conn: zqlite.Conn,
     repo: *Repo,
 
-    pub fn open(ctx: Ctx, repo: Repo) !void {
+    pub fn open(ctx: Context, repo: Repo) !void {
         const name = try std.fmt.allocPrint(ctx.alloc, "{s}-{s}.db", .{ repo.name, repo.arch });
         defer ctx.alloc.free(name);
         const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
@@ -132,13 +132,13 @@ pub const RepoConn = struct {
         try ctx.repos.put(repo.name, r);
     }
 
-    pub fn deinit(self: *RepoConn, ctx: Ctx) void {
+    pub fn deinit(self: *RepoConn, ctx: Context) void {
         self.conn.close();
         ctx.alloc.destroy(self.repo);
     }
 };
 
-pub fn getProvider(ctx: Ctx, name: []const u8, explicit: bool) !package.Provider {
+pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Provider {
     var providers: std.ArrayList(struct { conn: *RepoConn, name: []const u8, id: i64 }) = .empty;
     defer {
         for (providers.items) |item| ctx.alloc.free(item.name);
@@ -290,7 +290,7 @@ pub fn getProvider(ctx: Ctx, name: []const u8, explicit: bool) !package.Provider
     return .{ .info = pkg, .conn = provider.conn.*, .id = id };
 }
 
-pub fn getProviderWithDeps(ctx: Ctx, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
+pub fn getProviderWithDeps(ctx: Context, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
     var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
     defer {
         var it = seen.valueIterator();
@@ -302,7 +302,7 @@ pub fn getProviderWithDeps(ctx: Ctx, name: []const u8, constraint: ?[]const u8) 
 }
 
 fn getProviderWithDepsRecursive(
-    ctx: Ctx,
+    ctx: Context,
     name: []const u8,
     first: bool,
     seen: *std.AutoHashMap(i64, []const u8),

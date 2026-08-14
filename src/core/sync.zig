@@ -4,21 +4,21 @@ const r = @import("repo.zig");
 const RepoConn = r.RepoConn;
 const StoreConn = @import("../store/store.zig").StoreConn;
 const download = @import("../net/download.zig");
-const Ctx = @import("context.zig").Context;
+const Context = @import("context.zig").Context;
 const zqlite = @import("zqlite");
 const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
 const package = @import("package.zig");
 const ingest = @import("../store/ingest.zig");
 
-pub fn syncAllRepos(ctx: Ctx) !void {
+pub fn syncAllRepos(ctx: Context) !void {
     var it = ctx.repos.valueIterator();
     while (it.next()) |conn| {
         try syncRepo(ctx, conn);
     }
 }
 
-pub fn syncRepo(ctx: Ctx, conn: RepoConn) !void {
+pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
     const repo = conn.repo;
 
     var client = try download.CurlClient.init(ctx);
@@ -140,7 +140,7 @@ pub fn syncRepo(ctx: Ctx, conn: RepoConn) !void {
     try conn.conn.commit();
 }
 
-pub fn syncPackages(ctx: Ctx, store_conn: StoreConn, providers: []package.Provider) !void {
+pub fn syncPackages(ctx: Context, store_conn: StoreConn, providers: []package.Provider) !void {
     try store_conn.transaction();
     errdefer store_conn.rollback();
     for (providers) |provider| try syncPackage(ctx, store_conn, provider);
@@ -148,7 +148,7 @@ pub fn syncPackages(ctx: Ctx, store_conn: StoreConn, providers: []package.Provid
 }
 
 /// `syncPackage` requires that a valid transaction is already active
-pub fn syncPackage(ctx: Ctx, store_conn: StoreConn, provider: package.Provider) !void {
+pub fn syncPackage(ctx: Context, store_conn: StoreConn, provider: package.Provider) !void {
     var client = try download.CurlClient.init(ctx);
     defer client.deinit(ctx);
 
@@ -282,7 +282,7 @@ fn persistRelations(conn: zqlite.Conn, id: i64, pkg_info: package.PackageInfo) !
     }
 }
 
-fn resolvePkgFilename(ctx: Ctx, pkg: package.PackageInfo) ![]const u8 {
+fn resolvePkgFilename(ctx: Context, pkg: package.PackageInfo) ![]const u8 {
     const ver = try if (pkg.epoch != 0)
         std.fmt.allocPrint(ctx.alloc, "{d}:{s}", .{ pkg.epoch, pkg.version })
     else

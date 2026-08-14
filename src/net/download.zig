@@ -3,13 +3,13 @@ const curl = @import("curl");
 
 const RepoConn = @import("../core/repo.zig").RepoConn;
 const context = @import("../core/context.zig");
-const Ctx = context.Context;
+const Context = context.Context;
 
 pub const CurlClient = struct {
     easy: *curl.Easy,
     ca_bundle: std.array_list.Aligned(u8, null),
 
-    pub fn init(ctx: Ctx) !CurlClient {
+    pub fn init(ctx: Context) !CurlClient {
         var ca_bundle = try curl.allocCABundle(ctx.alloc, ctx.io);
         errdefer ca_bundle.deinit(ctx.alloc);
 
@@ -25,7 +25,7 @@ pub const CurlClient = struct {
         };
     }
 
-    pub fn deinit(self: *CurlClient, ctx: Ctx) void {
+    pub fn deinit(self: *CurlClient, ctx: Context) void {
         self.easy.deinit();
         ctx.alloc.destroy(self.easy);
         self.ca_bundle.deinit(ctx.alloc);
@@ -33,7 +33,7 @@ pub const CurlClient = struct {
 
     pub fn download(
         self: CurlClient,
-        ctx: Ctx,
+        ctx: Context,
         url: []const u8,
         dest: []const u8,
     ) !void {
@@ -64,7 +64,7 @@ pub const CurlClient = struct {
 
     pub fn downloadFromMirror(
         self: CurlClient,
-        ctx: Ctx,
+        ctx: Context,
         repo_conn: RepoConn,
         filename: []const u8,
         dest: []const u8,
