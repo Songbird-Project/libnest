@@ -4,6 +4,7 @@ const Context = @import("../core/context.zig").Context;
 const zqlite = @import("zqlite");
 
 pub const profile = @import("profile.zig");
+pub const ingest = @import("ingest.zig");
 pub const StoreConn = zqlite.Conn;
 
 const BuildStatus = enum {
@@ -65,6 +66,7 @@ pub fn newConn(ctx: Context) !StoreConn {
         \\  version TEXT NOT NULL,
         \\  epoch INTEGER NOT NULL DEFAULT 0,
         \\  release TEXT NOT NULL,
+        \\  explicit INTEGER NOT NULL DEFAULT 1 check(explicit IN (0, 1)),
         \\  arch TEXT NOT NULL,
         \\  repo TEXT NOT NULL,
         \\  UNIQUE(name, epoch, version, release)
