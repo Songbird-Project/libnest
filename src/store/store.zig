@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const package = @import("../core/package.zig");
 const Context = @import("../core/context.zig").Context;
 const zqlite = @import("zqlite");
@@ -121,28 +122,6 @@ pub fn newConn(ctx: Context) !StoreConn {
         \\CREATE INDEX IF NOT EXISTS replaces_idx ON replaces(name);
         \\CREATE INDEX IF NOT EXISTS licenses_idx ON licenses(name);
         \\
-        \\CREATE TABLE IF NOT EXISTS objects(
-        \\  id INTEGER PRIMARY KEY,
-        \\  path TEXT NOT NULL UNIQUE,
-        \\  hash BLOB NOT NULL,
-        \\  package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,
-        \\  size INTEGER NOT NULL,
-        \\  created INTEGER NOT NULL
-        \\);
-        \\
-        \\CREATE TABLE IF NOT EXISTS refs(
-        \\  referrer INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
-        \\  referent INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
-        \\  PRIMARY KEY (referrer, referent)
-        \\);
-        \\
-        \\CREATE TABLE IF NOT EXISTS gc_roots(
-        \\  id INTEGER PRIMARY KEY,
-        \\  obj_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
-        \\  label TEXT NOT NULL,
-        \\  created INTEGER NOT NULL
-        \\);
-        \\
         \\CREATE TABLE IF NOT EXISTS profiles(
         \\  id INTEGER PRIMARY KEY,
         \\  name TEXT NOT NULL UNIQUE,
@@ -160,12 +139,11 @@ pub fn newConn(ctx: Context) !StoreConn {
         \\
         \\CREATE TABLE IF NOT EXISTS gen_entries(
         \\  gen_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
-        \\  obj_id INTEGER NOT NULL REFERENCES  objects(id) ON DELETE RESTRICT,
-        \\  PRIMARY KEY (gen_id, obj_id)
+        \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE RESTRICT,
+        \\  PRIMARY KEY (gen_id, package_id)
         \\);
         \\
-        \\CREATE INDEX IF NOT EXISTS gen_entries_obj ON gen_entries(obj_id);
-        \\CREATE INDEX IF NOT EXISTS referent_idx ON refs(referent);
+        \\CREATE INDEX IF NOT EXISTS gen_entries_package ON gen_entries(package_id);
     );
 
     return conn;
@@ -182,32 +160,89 @@ pub fn objectPath(ctx: Context, hash: [32]u8) ![]u8 {
     });
 }
 
-pub fn addObject(
-    store_db: StoreConn,
-    path: []const u8,
-    hash: [32]u8,
-    size: i64,
-    package_id: ?i64,
-) !i64 {
-    const row = try store_db.row(
-        \\INSERT INTO objects(path, hash, size, package_id, created)
-        \\VALUES (?1, ?2, ?3, ?4, unixepoch())
-        \\ON CONFLICT(path) DO UPDATE SET size = excluded.size
-        \\RETURNING ID;
-    , .{ path, &hash, size, package_id });
-    defer row.?.deinit();
+pub fn clean(ctx: Context, store_conn: StoreConn) !struct { package_rows: usize, blobs: usize, bytes: i64 } {
+    try store_conn.transaction();
+    errdefer store_conn.rollback();
 
-    return row.?.int(0);
-}
+    var pkg_rows = try store_conn.rows(
+        \\SELECT p.id FROM packages p
+        \\LEFT JOIN gen_entries g ON g.package_id = p.id
+        \\WHERE g.package_id IS NULL
+    , .{});
+    defer pkg_rows.deinit();
 
-pub fn addRef(store_db: StoreConn, referrer: i64, referent: i64) !void {
-    try store_db.exec("INSERT INTO refs(referrer, referent) VALUES (?1, ?2)", .{
-        referrer, referent,
-    });
-}
+    var removed_packages: usize = 0;
+    while (pkg_rows.next()) |row| {
+        defer row.deinit();
+        try store_conn.execNoArgs("SAVEPOINT stale_package_rows");
+        errdefer store_conn.execNoArgs("ROLLBACK TO stale_package_rows") catch {};
 
-pub fn addRoot(store_db: StoreConn, obj_id: i64, label: []const u8) !void {
-    try store_db.exec("INSERT INTO gc_roots(obj_id, label, created) VALUES (?1, ?2, unixepoch())", .{
-        obj_id, label,
-    });
+        try store_conn.exec("DELETE FROM packages WHERE id = ?1", .{row.int(0)});
+        removed_packages += 1;
+
+        try store_conn.execNoArgs("RELEASE stale_package_rows");
+    }
+
+    var live: std.AutoHashMap([32]u8, void) = .init(ctx.alloc);
+    defer live.deinit();
+
+    var rows = try store_conn.rows(
+        \\SELECT DISTINCT f.hash FROM files f
+        \\JOIN gen_entries g ON g.package_id = f.package_id
+        \\WHERE f.hash IS NOT NULL
+    , .{});
+    defer rows.deinit();
+
+    while (rows.next()) |row| {
+        defer row.deinit();
+        const blob = row.blob(0);
+        if (blob.len != 32) return error.InvalidHash;
+        var hash: [32]u8 = undefined;
+        @memcpy(&hash, blob);
+        try live.put(hash, {});
+    }
+
+    var removed: usize = 0;
+    var freed_bytes: i64 = 0;
+
+    var blob_rows = try store_conn.rows("SELECT hash, size FROM blobs", .{});
+    defer blob_rows.deinit();
+
+    var to_delete: std.ArrayList([32]u8) = .empty;
+    defer to_delete.deinit(ctx.alloc);
+
+    while (blob_rows.next()) |row| {
+        defer row.deinit();
+        const blob = row.blob(0);
+        if (blob.len != 32) return error.InvalidHash;
+        var hash: [32]u8 = undefined;
+        @memcpy(&hash, blob);
+
+        if (live.contains(hash)) continue;
+
+        try to_delete.append(ctx.alloc, hash);
+        freed_bytes += row.int(1);
+    }
+
+    for (to_delete.items) |hash| {
+        try store_conn.execNoArgs("SAVEPOINT deletion");
+        errdefer store_conn.execNoArgs("ROLLBACK TO deletion") catch {};
+
+        try store_conn.exec("DELETE FROM blobs WHERE hash = ?1", .{&hash});
+
+        const blob_path = try objectPath(ctx, hash);
+        defer ctx.alloc.free(blob_path);
+        Io.Dir.cwd().deleteFile(ctx.io, blob_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+
+        removed += 1;
+        try store_conn.execNoArgs("RELEASE deletion");
+    }
+
+    try store_conn.commit();
+
+    try ctx.log(.Info, "Cleaned {d} blobs, {d} bytes freed", .{ removed, freed_bytes });
+    return .{ .package_rows = removed_packages, .blobs = removed, .bytes = freed_bytes };
 }
