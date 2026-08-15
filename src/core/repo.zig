@@ -17,7 +17,6 @@ pub const Repo = struct {
     name: []const u8,
     arch: []const u8,
     mirrors: []const []const u8,
-    priority: i32,
     enabled: bool = true,
 };
 
