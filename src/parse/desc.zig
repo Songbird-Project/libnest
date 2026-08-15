@@ -39,7 +39,7 @@ pub const Field = enum {
 pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !package.PackageInfo {
     var pkg = package.PackageInfo{
         .name = &.{},
-        .repo = try alloc.dupe(u8, repo),
+        .repo = repo,
         .epoch = 0,
         .version = &.{},
         .release = null,
@@ -57,21 +57,15 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
     var conflicts: std.ArrayList(package.Constrained) = .empty;
     var provides: std.ArrayList(package.Constrained) = .empty;
     var deps: std.ArrayList(package.Dependency) = .empty;
-
-    var lines = std.mem.splitScalar(u8, src, '\n');
-
     errdefer {
-        for (licenses.items) |i| alloc.free(i);
         licenses.deinit(alloc);
-        for (replaces.items) |*i| i.deinit(alloc);
         replaces.deinit(alloc);
-        for (conflicts.items) |*i| i.deinit(alloc);
         conflicts.deinit(alloc);
-        for (provides.items) |*i| i.deinit(alloc);
         provides.deinit(alloc);
-        for (deps.items) |*i| i.deinit(alloc);
         deps.deinit(alloc);
     }
+
+    var lines = std.mem.splitScalar(u8, src, '\n');
 
     var field: Field = .none;
 
@@ -89,51 +83,48 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
         }
 
         switch (field) {
-            .name => pkg.name = try alloc.dupe(u8, trimmed),
+            .name => pkg.name = trimmed,
             .version => {
                 const evr = ver.parseEVR(trimmed);
                 pkg.epoch = try std.fmt.parseUnsigned(u32, evr.epoch, 10);
-                pkg.version = try alloc.dupe(u8, evr.version);
-                pkg.release = if (evr.release) |r| try alloc.dupe(u8, r) else null;
+                pkg.version = evr.version;
+                pkg.release = if (evr.release) |r| r else null;
             },
-            .arch => pkg.arch = try alloc.dupe(u8, trimmed),
+            .arch => pkg.arch = trimmed,
             .checksum => {
                 var decoded: [32]u8 = undefined;
                 _ = try std.fmt.hexToBytes(&decoded, trimmed);
                 pkg.checksum = decoded;
             },
 
-            .licenses => try licenses.append(
-                alloc,
-                try alloc.dupe(u8, trimmed),
-            ),
+            .licenses => try licenses.append(alloc, trimmed),
             .replaces => try replaces.append(
                 alloc,
-                try package.Constrained.parse(alloc, trimmed),
+                package.Constrained.parse(trimmed),
             ),
             .conflicts => try conflicts.append(
                 alloc,
-                try package.Constrained.parse(alloc, trimmed),
+                package.Constrained.parse(trimmed),
             ),
             .provides => try provides.append(
                 alloc,
-                try package.Constrained.parse(alloc, trimmed),
+                package.Constrained.parse(trimmed),
             ),
             .depends => try deps.append(
                 alloc,
-                try package.Dependency.parse(alloc, trimmed, .Run),
+                package.Dependency.parse(trimmed, .Run),
             ),
             .makedeps => try deps.append(
                 alloc,
-                try package.Dependency.parse(alloc, trimmed, .Make),
+                package.Dependency.parse(trimmed, .Make),
             ),
             .checkdeps => try deps.append(
                 alloc,
-                try package.Dependency.parse(alloc, trimmed, .Check),
+                package.Dependency.parse(trimmed, .Check),
             ),
             .optdeps => try deps.append(
                 alloc,
-                try package.Dependency.parse(alloc, trimmed, .Optional),
+                package.Dependency.parse(trimmed, .Optional),
             ),
 
             .none => {},

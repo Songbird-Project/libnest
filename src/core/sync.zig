@@ -11,6 +11,65 @@ const desc = @import("../parse/desc.zig");
 const package = @import("package.zig");
 const ingest = @import("../store/ingest.zig");
 
+const RelationStmts = struct {
+    del_deps: zqlite.Stmt,
+    del_provs: zqlite.Stmt,
+    del_confs: zqlite.Stmt,
+    del_reps: zqlite.Stmt,
+    del_lics: zqlite.Stmt,
+    ins_deps: zqlite.Stmt,
+    ins_provs: zqlite.Stmt,
+    ins_confs: zqlite.Stmt,
+    ins_reps: zqlite.Stmt,
+    ins_lics: zqlite.Stmt,
+
+    pub fn init(ctx: Context, conn: zqlite.Conn) !RelationStmts {
+        return .{
+            .del_deps = try prepare(ctx, conn, "DELETE FROM depends WHERE package_id = ?1"),
+            .del_provs = try prepare(ctx, conn, "DELETE FROM provides WHERE package_id = ?1"),
+            .del_confs = try prepare(ctx, conn, "DELETE FROM conflicts WHERE package_id = ?1"),
+            .del_reps = try prepare(ctx, conn, "DELETE FROM replaces WHERE package_id = ?1"),
+            .del_lics = try prepare(ctx, conn, "DELETE FROM licenses WHERE package_id = ?1"),
+            .ins_deps = try prepare(ctx, conn, "INSERT INTO depends(package_id, name, kind, ver_constraint) VALUES (?1, ?2, ?3, ?4)"),
+            .ins_provs = try prepare(ctx, conn, "INSERT INTO provides(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)"),
+            .ins_confs = try prepare(ctx, conn, "INSERT INTO conflicts(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)"),
+            .ins_reps = try prepare(ctx, conn, "INSERT INTO replaces(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)"),
+            .ins_lics = try prepare(ctx, conn, "INSERT INTO licenses(package_id, name) VALUES (?1, ?2)"),
+        };
+    }
+
+    pub fn deinit(self: *RelationStmts) void {
+        self.del_deps.deinit();
+        self.del_provs.deinit();
+        self.del_confs.deinit();
+        self.del_reps.deinit();
+        self.del_lics.deinit();
+        self.ins_deps.deinit();
+        self.ins_provs.deinit();
+        self.ins_confs.deinit();
+        self.ins_reps.deinit();
+        self.ins_lics.deinit();
+    }
+};
+
+const PackageInsertStmt = zqlite.Stmt;
+
+pub fn initPackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInsertStmt {
+    return try prepare(
+        ctx,
+        conn,
+        \\INSERT INTO packages(name, epoch, version, release, explicit, arch, repo)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        \\ON CONFLICT(name) DO UPDATE SET
+        \\  epoch = excluded.epoch,
+        \\  version = excluded.version,
+        \\  release = excluded.release,
+        \\  explicit = excluded.explicit
+        \\RETURNING id;
+        ,
+    );
+}
+
 pub fn syncAllRepos(ctx: Context) !void {
     var it = ctx.repos.valueIterator();
     while (it.next()) |conn| {
@@ -74,9 +133,11 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
     defer db_file.close(ctx.io);
 
     try reader.openFd(db_file.handle);
-    var buf: [8192]u8 = undefined;
+    var buf: [16384]u8 = undefined;
 
-    const sync_stmt = conn.conn.prepare(
+    const sync_stmt = try prepare(
+        ctx,
+        conn.conn,
         \\INSERT INTO packages(name, checksum, epoch, version, release)
         \\VALUES (?1, ?2, ?3, ?4, ?5)
         \\ON CONFLICT(name) DO UPDATE SET
@@ -87,19 +148,26 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
         \\WHERE vercmp(excluded.epoch, excluded.version, excluded.release,
         \\             packages.epoch, packages.version, packages.release) > 0
         \\RETURNING id;
-    ) catch |err| {
-        try ctx.log(.Error, "Failed to prepare SQL statement: {s}\n", .{conn.conn.lastError()});
-        return err;
-    };
+        ,
+    );
+
+    var stmts: RelationStmts = try .init(ctx, conn.conn);
+    defer stmts.deinit();
 
     try conn.conn.transaction();
 
+    var arena: std.heap.ArenaAllocator = .init(ctx.alloc);
+    defer arena.deinit();
+
+    var contents: std.ArrayList(u8) = .empty;
+    defer contents.deinit(ctx.alloc);
+
     while (try reader.nextEntry()) |entry| {
+        contents.clearRetainingCapacity();
+        defer _ = arena.reset(.retain_capacity);
+
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
         if (!std.mem.eql(u8, std.Io.Dir.path.basename(path), "desc")) continue;
-
-        var contents: std.ArrayList(u8) = .empty;
-        defer contents.deinit(ctx.alloc);
 
         while (true) {
             const read = try reader.readData(&buf);
@@ -107,22 +175,18 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
             try contents.appendSlice(ctx.alloc, buf[0..read]);
         }
 
-        var pkg_info = try desc.parse(
-            ctx.alloc,
+        const pkg_info = try desc.parse(
+            arena.allocator(),
             repo.name,
             contents.items,
         );
-        defer pkg_info.deinit(ctx.alloc);
 
         if (!std.mem.eql(u8, pkg_info.arch, repo.arch) and
             !std.mem.eql(u8, pkg_info.arch, "any")) continue;
 
-        try conn.conn.execNoArgs("SAVEPOINT pkg");
-        errdefer conn.conn.execNoArgs("ROLLBACK TO pkg") catch {};
-
         try sync_stmt.bind(.{
             pkg_info.name,
-            pkg_info.checksum,
+            if (pkg_info.checksum) |sum| &sum else null,
             pkg_info.epoch,
             pkg_info.version,
             pkg_info.release,
@@ -131,11 +195,10 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
 
         if (row) {
             const id = sync_stmt.int(0);
-            try persistRelations(conn.conn, id, pkg_info);
+            try persistRelations(id, pkg_info, stmts);
         }
 
         try sync_stmt.reset();
-        try conn.conn.execNoArgs("RELEASE pkg");
     }
 
     try conn.conn.execNoArgs("UPDATE metadata SET last_refresh = unixepoch()");
@@ -145,12 +208,28 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
 pub fn syncPackages(ctx: Context, store_conn: StoreConn, providers: []package.Provider) !void {
     try store_conn.transaction();
     errdefer store_conn.rollback();
-    for (providers) |provider| try syncPackage(ctx, store_conn, provider);
+    var stmts: RelationStmts = try .init(ctx, store_conn);
+    defer stmts.deinit();
+    const ins = try initPackageInsertStmt(ctx, store_conn);
+    defer ins.deinit();
+    for (providers) |provider| try syncPackage(
+        ctx,
+        store_conn,
+        provider,
+        stmts,
+        ins,
+    );
     try store_conn.commit();
 }
 
 /// `syncPackage` requires that a valid transaction is already active
-pub fn syncPackage(ctx: Context, store_conn: StoreConn, provider: package.Provider) !void {
+pub fn syncPackage(
+    ctx: Context,
+    store_conn: StoreConn,
+    provider: package.Provider,
+    stmts: RelationStmts,
+    insert_stmt: PackageInsertStmt,
+) !void {
     var client = try download.CurlClient.init(ctx);
     defer client.deinit(ctx);
 
@@ -216,25 +295,13 @@ pub fn syncPackage(ctx: Context, store_conn: StoreConn, provider: package.Provid
     file_reader.seekTo(0);
     try reader.openFd(file.handle);
 
-    try store_conn.execNoArgs("SAVEPOINT ingest");
-    errdefer store_conn.execNoArgs("ROLLBACK TO ingest") catch {};
-
     const existing = try store_conn.row("SELECT explicit FROM packages WHERE name = ?1", .{pkg.name});
     if (existing) |er| {
         defer er.deinit();
         pkg.explicit = if (er.int(0) != 0) true else pkg.explicit;
     }
 
-    const sr = try store_conn.row(
-        \\INSERT INTO packages(name, epoch, version, release, explicit, arch, repo)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        \\ON CONFLICT(name) DO UPDATE SET
-        \\  epoch = excluded.epoch,
-        \\  version = excluded.version,
-        \\  release = excluded.release,
-        \\  explicit = excluded.explicit
-        \\RETURNING id;
-    , .{
+    try insert_stmt.bind(.{
         pkg.name,
         pkg.epoch,
         pkg.version,
@@ -243,46 +310,49 @@ pub fn syncPackage(ctx: Context, store_conn: StoreConn, provider: package.Provid
         pkg.arch,
         pkg.repo,
     });
-    defer sr.?.deinit();
-    const store_id = sr.?.int(0);
-    try ingest.ingestPackage(ctx, store_conn, reader, store_id);
-    try persistRelations(store_conn, store_id, pkg);
+    _ = try insert_stmt.step();
+    const store_id = insert_stmt.?.int(0);
 
-    try store_conn.execNoArgs("RELEASE ingest");
+    try ingest.ingestPackage(ctx, store_conn, reader, store_id);
+    try persistRelations(store_id, pkg, stmts);
+
+    try insert_stmt.reset();
 }
 
-fn persistRelations(conn: zqlite.Conn, id: i64, pkg_info: package.PackageInfo) !void {
-    try conn.exec("DELETE FROM depends WHERE package_id = ?1;", .{id});
-    try conn.exec("DELETE FROM provides WHERE package_id = ?1;", .{id});
-    try conn.exec("DELETE FROM conflicts WHERE package_id = ?1;", .{id});
-    try conn.exec("DELETE FROM replaces WHERE package_id = ?1;", .{id});
-    try conn.exec("DELETE FROM licenses WHERE package_id = ?1;", .{id});
-    for (pkg_info.deps) |dep| {
-        try conn.exec(
-            \\INSERT INTO depends(package_id, name, kind, ver_constraint) VALUES (?1, ?2, ?3, ?4)
-        , .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
-    }
-    for (pkg_info.provides) |provide| {
-        try conn.exec(
-            \\INSERT INTO provides(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
-        , .{ id, provide.name, provide.constraint });
-    }
+fn prepare(ctx: Context, conn: zqlite.Conn, sql: []const u8) !zqlite.Stmt {
+    return conn.prepare(sql) catch |err| {
+        try ctx.log(.Error, "Failed to prepare SQL statement: {s}\n", .{conn.lastError()});
+        return err;
+    };
+}
 
-    for (pkg_info.conflicts) |confs| {
-        try conn.exec(
-            \\INSERT INTO conflicts(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
-        , .{ id, confs.name, confs.constraint });
-    }
-    for (pkg_info.replaces) |reps| {
-        try conn.exec(
-            \\INSERT INTO replaces(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)
-        , .{ id, reps.name, reps.constraint });
-    }
-    for (pkg_info.licenses) |license| {
-        try conn.exec(
-            \\INSERT INTO licenses(package_id, name) VALUES (?1, ?2)
-        , .{ id, license });
-    }
+fn bindAndExec(stmt: zqlite.Stmt, values: anytype) !void {
+    try stmt.bind(values);
+    try stmt.stepToCompletion();
+    try stmt.reset();
+}
+
+fn persistRelations(
+    id: i64,
+    pkg_info: package.PackageInfo,
+    stmts: RelationStmts,
+) !void {
+    try bindAndExec(stmts.del_deps, .{id});
+    try bindAndExec(stmts.del_provs, .{id});
+    try bindAndExec(stmts.del_confs, .{id});
+    try bindAndExec(stmts.del_reps, .{id});
+    try bindAndExec(stmts.del_lics, .{id});
+
+    for (pkg_info.deps) |dep|
+        try bindAndExec(stmts.ins_deps, .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
+    for (pkg_info.provides) |provide|
+        try bindAndExec(stmts.ins_provs, .{ id, provide.name, provide.constraint });
+    for (pkg_info.conflicts) |confs|
+        try bindAndExec(stmts.ins_confs, .{ id, confs.name, confs.constraint });
+    for (pkg_info.replaces) |reps|
+        try bindAndExec(stmts.ins_reps, .{ id, reps.name, reps.constraint });
+    for (pkg_info.licenses) |license|
+        try bindAndExec(stmts.ins_lics, .{ id, license });
 }
 
 fn resolvePkgFilename(ctx: Context, pkg: package.PackageInfo) ![]const u8 {

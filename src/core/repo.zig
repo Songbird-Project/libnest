@@ -46,6 +46,7 @@ pub const RepoConn = struct {
             \\PRAGMA foreign_keys=ON;
             \\PRAGMA journal_mode=WAL;
             \\PRAGMA cache_size=-200000;
+            \\PRAGMA synchronous=NORMAL;
             \\
             \\CREATE TABLE IF NOT EXISTS metadata(
             \\  last_refresh INTEGER,

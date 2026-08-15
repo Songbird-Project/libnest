@@ -25,7 +25,9 @@ pub fn build(b: *std.Build) void {
     ) orelse "libnest.zon";
 
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{
+        .preferred_optimize_mode = .ReleaseSafe,
+    });
 
     const config_cwd: std.Build.LazyPath = .{ .cwd_relative = config_path };
     const config_mod = b.createModule(.{ .root_source_file = config_cwd });

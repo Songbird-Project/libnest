@@ -59,7 +59,7 @@ pub const Constrained = struct {
     name: []const u8,
     constraint: ?[]const u8 = null,
 
-    pub fn parse(alloc: Allocator, src: []const u8) !Constrained {
+    pub fn parseAlloc(alloc: Allocator, src: []const u8) !Constrained {
         var parsed: Constrained = undefined;
 
         if (std.mem.findAny(u8, src, "=<>")) |idx| {
@@ -67,6 +67,20 @@ pub const Constrained = struct {
             parsed.constraint = try alloc.dupe(u8, src[idx..]);
         } else {
             parsed.name = try alloc.dupe(u8, src);
+            parsed.constraint = null;
+        }
+
+        return parsed;
+    }
+
+    pub fn parse(src: []const u8) Constrained {
+        var parsed: Constrained = undefined;
+
+        if (std.mem.findAny(u8, src, "=<>")) |idx| {
+            parsed.name = src[0..idx];
+            parsed.constraint = src[idx..];
+        } else {
+            parsed.name = src;
             parsed.constraint = null;
         }
 
@@ -84,7 +98,7 @@ pub const Dependency = struct {
     kind: DepKind,
     constraint: ?[]const u8,
 
-    pub fn parse(alloc: Allocator, dep: []const u8, kind: DepKind) !Dependency {
+    pub fn parseAlloc(alloc: Allocator, dep: []const u8, kind: DepKind) !Dependency {
         var parsed: Dependency = undefined;
         parsed.kind = kind;
 
@@ -93,6 +107,21 @@ pub const Dependency = struct {
             parsed.constraint = try alloc.dupe(u8, dep[idx..]);
         } else {
             parsed.name = try alloc.dupe(u8, dep);
+            parsed.constraint = null;
+        }
+
+        return parsed;
+    }
+
+    pub fn parse(dep: []const u8, kind: DepKind) Dependency {
+        var parsed: Dependency = undefined;
+        parsed.kind = kind;
+
+        if (std.mem.findAny(u8, dep, "=<>")) |idx| {
+            parsed.name = dep[0..idx];
+            parsed.constraint = dep[idx..];
+        } else {
+            parsed.name = dep;
             parsed.constraint = null;
         }
 

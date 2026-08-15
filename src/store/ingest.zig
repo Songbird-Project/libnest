@@ -51,9 +51,6 @@ pub fn ingestPackage(ctx: Context, db: store.StoreConn, reader: *archive.Reader,
 
         if (result.kind == .skip) continue;
 
-        try db.execNoArgs("SAVEPOINT ingest");
-        errdefer db.execNoArgs("ROLLBACK TO ingest") catch {};
-
         switch (result.kind) {
             .file => {
                 try hashes.put(result.path, result.hash.?);
@@ -82,8 +79,6 @@ pub fn ingestPackage(ctx: Context, db: store.StoreConn, reader: *archive.Reader,
             .dir => {},
             else => unreachable,
         }
-
-        try db.execNoArgs("RELEASE ingest");
     }
 }
 
