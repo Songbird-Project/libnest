@@ -25,6 +25,11 @@ pub const RepoConn = struct {
     repo: *Repo,
 
     pub fn open(ctx: *Context, repo: Repo) !void {
+        if (repo.mirrors.len <= 0) {
+            try ctx.log(.Error, "Remote repos '{s}' has no mirrors listed\n", .{repo.name});
+            return error.NoMirrors;
+        }
+
         const name = try std.fmt.allocPrint(ctx.alloc, "{s}-{s}.db", .{ repo.name, repo.arch });
         defer ctx.alloc.free(name);
         const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
