@@ -25,7 +25,7 @@ pub const RepoConn = struct {
     conn: zqlite.Conn,
     repo: *Repo,
 
-    pub fn open(ctx: Context, repo: Repo) !void {
+    pub fn open(ctx: *Context, repo: Repo) !void {
         const name = try std.fmt.allocPrint(ctx.alloc, "{s}-{s}.db", .{ repo.name, repo.arch });
         defer ctx.alloc.free(name);
         const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
