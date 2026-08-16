@@ -132,6 +132,34 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
     };
     defer db_file.close(ctx.io);
 
+    var db_hasher: std.crypto.hash.Blake3 = .init(.{});
+    var reader_buf: [4096]u8 = undefined;
+    var db_reader = db_file.reader(ctx.io, &reader_buf);
+    const io_reader = &db_reader.interface;
+
+    var db_buf: [4096]u8 = undefined;
+    while (true) {
+        const bytes = try io_reader.readSliceShort(&db_buf);
+        if (bytes <= 0) break;
+        db_hasher.update(db_buf[0..bytes]);
+    }
+
+    var db_hash: [32]u8 = undefined;
+    db_hasher.final(&db_hash);
+
+    const existing_hash_row = try conn.conn.row("SELECT hash FROM metadata", .{});
+    if (existing_hash_row) |row| {
+        defer row.deinit();
+        if (row.get(?[]const u8, 0)) |blob| {
+            if (blob.len != 32) return error.InvalidHash;
+            if (std.mem.eql(u8, blob, &db_hash)) {
+                try ctx.log(.Info, "{s} is up to date", .{conn.repo.name});
+                return;
+            }
+        }
+    }
+
+    try db_reader.seekTo(0);
     try reader.openFd(db_file.handle);
     var buf: [16384]u8 = undefined;
 
@@ -155,6 +183,7 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
     defer stmts.deinit();
 
     try conn.conn.transaction();
+    errdefer conn.conn.rollback();
 
     var arena: std.heap.ArenaAllocator = .init(ctx.alloc);
     defer arena.deinit();
@@ -201,7 +230,7 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
         try sync_stmt.reset();
     }
 
-    try conn.conn.execNoArgs("UPDATE metadata SET last_refresh = unixepoch()");
+    try conn.conn.exec("UPDATE metadata SET last_refresh = unixepoch(), hash = ?1", .{&db_hash});
     try conn.conn.commit();
 }
 
@@ -292,7 +321,7 @@ pub fn syncPackage(
     hasher.final(&sum);
     if (pkg.checksum != null and !std.mem.eql(u8, &sum, &pkg.checksum.?)) return error.CorruptFile;
 
-    file_reader.seekTo(0);
+    try file_reader.seekTo(0);
     try reader.openFd(file.handle);
 
     const existing = try store_conn.row("SELECT explicit FROM packages WHERE name = ?1", .{pkg.name});

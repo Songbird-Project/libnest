@@ -56,7 +56,9 @@ pub const RepoConn = struct {
             \\CREATE TABLE IF NOT EXISTS metadata(
             \\  last_refresh INTEGER,
             \\  name STRING NOT NULL,
-            \\  architecture STRING NOT NULL
+            \\  architecture STRING NOT NULL,
+            \\  hash BLOB,
+            \\  UNIQUE(name)
             \\);
             \\
             \\CREATE TABLE IF NOT EXISTS packages(
@@ -107,9 +109,9 @@ pub const RepoConn = struct {
         );
 
         try conn.exec(
-            "INSERT INTO metadata(name, architecture) VALUES (?1, ?2)",
-            .{ repo.name, repo.arch },
-        );
+            \\INSERT INTO metadata(name, architecture) VALUES (?1, ?2)
+            \\ON CONFLICT(name) DO NOTHING
+        , .{ repo.name, repo.arch });
 
         const res = zqlite.c.sqlite3_create_function_v2(
             conn.conn,
