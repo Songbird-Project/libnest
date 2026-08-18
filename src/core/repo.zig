@@ -164,7 +164,7 @@ pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Prov
             });
         }
 
-        const provider_rows = try repo.conn.rows("SELECT package_id FROM provides WHERE name = ?1", .{name});
+        var provider_rows = try repo.conn.rows("SELECT package_id FROM provides WHERE name = ?1", .{name});
         defer provider_rows.deinit();
 
         blk: while (provider_rows.next()) |r| {
