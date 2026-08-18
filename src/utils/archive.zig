@@ -19,7 +19,7 @@ pub fn ingestFile(ctx: Ctx, reader: *Reader, path: []const u8, mode: u32) !inges
     var src: std.Random.IoSource = .{ .io = ctx.io };
     const rand = src.interface();
 
-    const tmp_name = try std.fmt.allocPrint(ctx.alloc, ".tmp-{s}", .{rand.int(u8)});
+    const tmp_name = try std.fmt.allocPrint(ctx.alloc, ".tmp-{d}", .{rand.int(u8)});
     defer ctx.alloc.free(tmp_name);
     const tmp_path = try Io.Dir.path.join(ctx.alloc, &.{
         ctx.path_options.store,
@@ -58,7 +58,7 @@ pub fn ingestFile(ctx: Ctx, reader: *Reader, path: []const u8, mode: u32) !inges
     if (found) {
         try Io.Dir.cwd().deleteFile(ctx.io, tmp_path);
     } else {
-        try Io.Dir.cwd().createDirPath(ctx.io, Io.Dir.path.dirname(blob_path));
+        try Io.Dir.cwd().createDirPath(ctx.io, Io.Dir.path.dirname(blob_path).?);
         try Io.Dir.cwd().rename(
             tmp_path,
             .cwd(),

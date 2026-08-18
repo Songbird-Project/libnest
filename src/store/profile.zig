@@ -7,7 +7,7 @@ const StoreConn = store.StoreConn;
 pub fn new(store_db: StoreConn, name: []const u8) !i64 {
     const row = try store_db.row(
         \\INSERT INTO profiles(name) VALUES (?1)
-        \\ON CONFLICT(name) DO UPDATE SET name = excluded.name
+        \\ON CONFLICT(name) DO NOTHING
         \\RETURNING id;
     , .{name});
     defer row.?.deinit();
@@ -15,7 +15,7 @@ pub fn new(store_db: StoreConn, name: []const u8) !i64 {
     return row.?.int(0);
 }
 
-pub fn getId(ctx: Context, store_db: StoreConn, name: []const u8) !i64 {
+pub fn getId(store_db: StoreConn, name: []const u8) !i64 {
     const row = try store_db.row("SELECT * FROM profiles WHERE name = ?1", .{name});
 
     if (row) |r| {
@@ -23,7 +23,6 @@ pub fn getId(ctx: Context, store_db: StoreConn, name: []const u8) !i64 {
         return r.int(0);
     }
 
-    try ctx.log(.Error, "Couldn't find profile: '{s}'", .{name});
     return error.ProfileNotFound;
 }
 
@@ -35,6 +34,5 @@ pub fn getName(ctx: Context, store_db: StoreConn, id: i64) ![]const u8 {
         return try ctx.alloc.dupe(u8, r.cString(1));
     }
 
-    try ctx.log(.Error, "Couldn't find profile with id: '{d}'", .{id});
     return error.ProfileNotFound;
 }

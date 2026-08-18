@@ -57,18 +57,18 @@ pub fn ingestPackage(ctx: Context, db: store.StoreConn, reader: *archive.Reader,
                 try db.exec(
                     \\INSERT INTO blobs(hash, size, created)
                     \\VALUES(?1, ?2, unixepoch()) ON CONFLICT DO NOTHING
-                , .{ result.hash, result.size });
+                , .{ if (result.hash) |hash| &hash else null, result.size });
                 try db.exec(
                     \\INSERT INTO files(package_id, path, hash, target, mode)
                     \\VALUES (?,?,?,NULL,?)
-                , .{ id, result.path, result.hash, result.mode });
+                , .{ id, result.path, if (result.hash) |hash| &hash else null, result.mode });
             },
             .link => {
                 const hash = hashes.get(result.links_to.?) orelse return error.UnresolvedLink;
                 try db.exec(
                     \\INSERT INTO files(package_id, path, hash, target, mode)
                     \\VALUES (?,?,?,NULL,?)
-                , .{ id, result.path, hash, result.mode });
+                , .{ id, result.path, &hash, result.mode });
             },
             .symlink => {
                 try db.exec(

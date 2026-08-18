@@ -93,6 +93,8 @@ fn defaultLogCb(io: Io, level: LogLevel, msg: []const u8) !void {
 }
 
 fn defaultSelectCb(io: Io, items: usize) !usize {
+    if (items == 0) return 0;
+
     var stdin_buf: [16]u8 = undefined;
     const stdin_file = Io.File.stdin();
 
@@ -109,6 +111,7 @@ fn defaultSelectCb(io: Io, items: usize) !usize {
 
     while (true) {
         try w.print("Select [1-{d}]: ", .{items});
+        try w.flush();
 
         _ = try stdin.streamDelimiter(&input, '\n');
         const trimmed = std.mem.trim(u8, input.buffered(), " \t\r\n");

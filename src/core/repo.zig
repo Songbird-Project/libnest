@@ -199,10 +199,16 @@ pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Prov
 
     const id = row.int(0);
     const pkg = try ctx.alloc.create(package.PackageInfo);
+
+    const blob = row.blob(2);
+    if (blob.len != 32) return error.InvalidHash;
+    var hash: [32]u8 = undefined;
+    @memcpy(&hash, blob);
+
     pkg.* = .{
         .name = try ctx.alloc.dupe(u8, row.cString(1)),
         .arch = try ctx.alloc.dupe(u8, provider.conn.repo.arch),
-        .checksum = row.get(?[32]u8, 2),
+        .checksum = hash,
         .repo = try ctx.alloc.dupe(u8, provider.conn.repo.name),
         .epoch = @intCast(row.int(3)),
         .version = try ctx.alloc.dupe(u8, row.cString(4)),
@@ -210,17 +216,22 @@ pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Prov
         .explicit = explicit,
     };
 
-    var depends: std.ArrayList(package.DepKind) = .empty;
+    var depends: std.ArrayList(package.Dependency) = .empty;
     errdefer {
-        for (depends.items) |dep| dep.deinit(ctx.alloc);
+        for (depends.items) |*dep| dep.deinit(ctx.alloc);
         depends.deinit(ctx.alloc);
     }
-    const depend_rows = try conn.rows("SELECT * FROM depends WHERE package_id = ?1", .{id});
+    var depend_rows = try conn.rows("SELECT * FROM depends WHERE package_id = ?1", .{id});
+    defer depend_rows.deinit();
     while (depend_rows.next()) |dep| {
+        defer dep.deinit();
+
         try depends.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, dep.cString(1)),
             .constraint = if (dep.get(?[]const u8, 2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint),
+                try ctx.alloc.dupe(u8, constraint)
+            else
+                null,
             .kind = switch (dep.int(3)) {
                 0 => .Run,
                 1 => .Make,
@@ -237,45 +248,57 @@ pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Prov
 
     var provides: std.ArrayList(package.Constrained) = .empty;
     errdefer {
-        for (provides.items) |constraint| constraint.deinit(ctx.alloc);
+        for (provides.items) |*constraint| constraint.deinit(ctx.alloc);
         provides.deinit(ctx.alloc);
     }
-    const provide_rows = try conn.rows("SELECT * FROM provides WHERE package_id = ?1", .{id});
+    var provide_rows = try conn.rows("SELECT * FROM provides WHERE package_id = ?1", .{id});
+    defer provide_rows.deinit();
     while (provide_rows.next()) |r| {
+        defer r.deinit();
         try provides.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, r.cString(1)),
             .constraint = if (r.get(?[]const u8, 2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint),
+                try ctx.alloc.dupe(u8, constraint)
+            else
+                null,
         });
     }
     pkg.provides = try provides.toOwnedSlice(ctx.alloc);
 
     var conflicts: std.ArrayList(package.Constrained) = .empty;
     errdefer {
-        for (conflicts.items) |constraint| constraint.deinit(ctx.alloc);
+        for (conflicts.items) |*constraint| constraint.deinit(ctx.alloc);
         conflicts.deinit(ctx.alloc);
     }
-    const conflict_rows = try conn.rows("SELECT * FROM conflicts WHERE package_id = ?1", .{id});
+    var conflict_rows = try conn.rows("SELECT * FROM conflicts WHERE package_id = ?1", .{id});
+    defer conflict_rows.deinit();
     while (conflict_rows.next()) |r| {
+        defer r.deinit();
         try conflicts.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, r.cString(1)),
             .constraint = if (r.get(?[]const u8, 2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint),
+                try ctx.alloc.dupe(u8, constraint)
+            else
+                null,
         });
     }
     pkg.conflicts = try conflicts.toOwnedSlice(ctx.alloc);
 
     var replaces: std.ArrayList(package.Constrained) = .empty;
     errdefer {
-        for (replaces.items) |constraint| constraint.deinit(ctx.alloc);
+        for (replaces.items) |*constraint| constraint.deinit(ctx.alloc);
         replaces.deinit(ctx.alloc);
     }
-    const replace_rows = try conn.rows("SELECT * FROM replaces WHERE package_id = ?1", .{id});
+    var replace_rows = try conn.rows("SELECT * FROM replaces WHERE package_id = ?1", .{id});
+    defer replace_rows.deinit();
     while (replace_rows.next()) |r| {
+        defer r.deinit();
         try replaces.append(ctx.alloc, .{
             .name = try ctx.alloc.dupe(u8, r.cString(1)),
             .constraint = if (r.get(?[]const u8, 2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint),
+                try ctx.alloc.dupe(u8, constraint)
+            else
+                null,
         });
     }
     pkg.replaces = try replaces.toOwnedSlice(ctx.alloc);
@@ -285,8 +308,10 @@ pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Prov
         for (licenses.items) |license| ctx.alloc.free(license);
         licenses.deinit(ctx.alloc);
     }
-    const license_rows = try conn.rows("SELECT * FROM licenses WHERE package_id = ?1", .{id});
+    var license_rows = try conn.rows("SELECT * FROM licenses WHERE package_id = ?1", .{id});
+    defer license_rows.deinit();
     while (license_rows.next()) |r| {
+        defer r.deinit();
         try licenses.append(
             ctx.alloc,
             try ctx.alloc.dupe(u8, r.cString(1)),

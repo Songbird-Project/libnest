@@ -33,19 +33,19 @@ pub fn getNumber(store_conn: StoreConn, gen_id: i64) !struct { profile: i64, num
 }
 
 pub fn getCurrent(store_conn: StoreConn, profile_id: i64) !i64 {
-    const profile_row = try store_conn.row(
+    const gen_row = try store_conn.row(
         "SELECT generation FROM profiles WHERE id = ?1",
         .{profile_id},
     );
-    if (profile_row == null) return error.ProfileNotFound;
-    defer profile_row.?.deinit();
+    if (gen_row == null) return error.NoGenerations;
+    defer gen_row.?.deinit();
 
-    return profile_row.?.int(0);
+    return gen_row.?.int(0);
 }
 
 pub fn getLatest(store_conn: StoreConn, profile_id: i64) !i64 {
     const latest_gen_row = try store_conn.row(
-        "SELECT COALESCE(MAX(number), -2623) from generations WHERE profile_id = 1",
+        "SELECT COALESCE(MAX(number), -2623) from generations WHERE profile_id = ?1",
         .{profile_id},
     );
     if (latest_gen_row == null) return error.NoGenerations;
@@ -246,10 +246,7 @@ pub fn purgeUnsafe(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
     });
     defer ctx.alloc.free(gen_dir);
 
-    Io.Dir.cwd().deleteTree(ctx.io, gen_dir) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    try Io.Dir.cwd().deleteTree(ctx.io, gen_dir);
 }
 
 pub fn purge(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
@@ -281,25 +278,16 @@ pub fn purge(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
 
 /// Purge old generations from the profile
 /// Skips the current, previous and any protected generations
-///
-/// If `keep` is <= -1 then this is a no-op
-/// If `keep` is >= 0  then it will always be at least 2
-pub fn purgeAll(ctx: Context, store_conn: StoreConn, profile_id: i64, keep_previous: i32) !void {
-    if (keep_previous <= -1) return;
-    const keep = keep_previous + 2;
-
+pub fn purgeAll(ctx: Context, store_conn: StoreConn, profile_id: i64, older_than: u32) !void {
+    const current_gen = try getCurrent(store_conn, profile_id);
     const profile_name = try profile.getName(ctx, store_conn, profile_id);
     defer ctx.alloc.free(profile_name);
 
-    const gens = try store_conn.rows(
+    var gens = try store_conn.rows(
         "SELECT id,number,protected FROM generations WHERE profile_id = ?1 ORDER BY number DESC",
         .{profile_id},
     );
     defer gens.deinit();
-
-    const current_gen = try getCurrent(store_conn, profile_id);
-
-    var seen: usize = 0;
 
     try store_conn.transaction();
     errdefer store_conn.rollback();
@@ -310,10 +298,8 @@ pub fn purgeAll(ctx: Context, store_conn: StoreConn, profile_id: i64, keep_previ
         const gen_num = gen.int(1);
         const protected = gen.int(2) != 0;
 
-        seen += 1;
-
         if (protected or gen_num == current_gen or gen_num == current_gen - 1) {
-            if (seen > keep) try ctx.log(
+            if (gen_num < older_than) try ctx.log(
                 .Info,
                 "Generation {d} in '{s}' is protected, skipping...\n",
                 .{ gen_num, profile_name },
@@ -321,14 +307,9 @@ pub fn purgeAll(ctx: Context, store_conn: StoreConn, profile_id: i64, keep_previ
             continue;
         }
 
-        if (seen <= keep) continue;
-
-        try store_conn.execNoArgs("SAVEPOINT purge");
-        errdefer store_conn.execNoArgs("ROLLBACK TO purge") catch {};
+        if (gen_num <= older_than) continue;
 
         try purgeUnsafe(ctx, store_conn, gen_id);
-
-        try store_conn.execNoArgs("RELEASE purge");
     }
 
     try store_conn.commit();

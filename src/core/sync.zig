@@ -265,7 +265,7 @@ pub fn syncPackage(
     const repo = provider.conn;
     var pkg = provider.info;
 
-    const pkg_filename = try resolvePkgFilename(ctx, pkg);
+    const pkg_filename = try resolvePkgFilename(ctx, pkg.*);
     defer ctx.alloc.free(pkg_filename);
     const dest = try Io.Dir.path.join(ctx.alloc, &.{
         ctx.path_options.root,
@@ -304,7 +304,7 @@ pub fn syncPackage(
     };
     defer file.close(ctx.io);
 
-    var hasher: std.crypto.hash.sha2.Sha256 = .init();
+    var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
 
     var reader_buf: [4096]u8 = undefined;
     var file_reader = file.reader(ctx.io, &reader_buf);
@@ -340,10 +340,10 @@ pub fn syncPackage(
         pkg.repo,
     });
     _ = try insert_stmt.step();
-    const store_id = insert_stmt.?.int(0);
+    const store_id = insert_stmt.int(0);
 
-    try ingest.ingestPackage(ctx, store_conn, reader, store_id);
-    try persistRelations(store_id, pkg, stmts);
+    try ingest.ingestPackage(ctx, store_conn, &reader, store_id);
+    try persistRelations(store_id, pkg.*, stmts);
 
     try insert_stmt.reset();
 }
