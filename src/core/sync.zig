@@ -153,7 +153,7 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
         if (row.get(?[]const u8, 0)) |blob| {
             if (blob.len != 32) return error.InvalidHash;
             if (std.mem.eql(u8, blob, &db_hash)) {
-                try ctx.log(.Info, "{s} is up to date", .{conn.repo.name});
+                try ctx.log(.Info, "{s} is up to date\n", .{conn.repo.name});
                 return;
             }
         }

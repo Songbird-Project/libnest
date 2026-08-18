@@ -43,6 +43,19 @@ pub fn getCurrent(store_conn: StoreConn, profile_id: i64) !i64 {
     return profile_row.?.int(0);
 }
 
+pub fn getLatest(store_conn: StoreConn, profile_id: i64) !i64 {
+    const latest_gen_row = try store_conn.row(
+        "SELECT COALESCE(MAX(number), -2623) from generations WHERE profile_id = 1",
+        .{profile_id},
+    );
+    if (latest_gen_row == null) return error.NoGenerations;
+    defer latest_gen_row.?.deinit();
+
+    const num = latest_gen_row.?.int(0);
+    if (num == -2623) return error.NoGenerations;
+    return num;
+}
+
 pub fn new(store_db: StoreConn, profile_id: i64) !i64 {
     try store_db.transaction();
     errdefer store_db.rollback();
