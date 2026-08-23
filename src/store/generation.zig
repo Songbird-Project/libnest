@@ -152,7 +152,7 @@ pub fn build(
                 else => return err,
             };
 
-            if (row.get(?[]const u8, 2)) |target| {
+            if (row.nullableCString(2)) |target| {
                 try Io.Dir.cwd().symLink(ctx.io, target, dest, .{});
             } else {
                 const str_blob = row.blob(1);
@@ -293,7 +293,6 @@ pub fn purgeAll(ctx: Context, store_conn: StoreConn, profile_id: i64, older_than
     errdefer store_conn.rollback();
 
     while (gens.next()) |gen| {
-        defer gen.deinit();
         const gen_id = gen.int(0);
         const gen_num = gen.int(1);
         const protected = gen.int(2) != 0;

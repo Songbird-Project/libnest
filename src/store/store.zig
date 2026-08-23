@@ -173,7 +173,6 @@ pub fn clean(ctx: Context, store_conn: StoreConn) !struct { package_rows: usize,
 
     var removed_packages: usize = 0;
     while (pkg_rows.next()) |row| {
-        defer row.deinit();
         try store_conn.execNoArgs("SAVEPOINT stale_package_rows");
         errdefer store_conn.execNoArgs("ROLLBACK TO stale_package_rows") catch {};
 
@@ -194,7 +193,6 @@ pub fn clean(ctx: Context, store_conn: StoreConn) !struct { package_rows: usize,
     defer rows.deinit();
 
     while (rows.next()) |row| {
-        defer row.deinit();
         const blob = row.blob(0);
         if (blob.len != 32) return error.InvalidHash;
         var hash: [32]u8 = undefined;
@@ -212,7 +210,6 @@ pub fn clean(ctx: Context, store_conn: StoreConn) !struct { package_rows: usize,
     defer to_delete.deinit(ctx.alloc);
 
     while (blob_rows.next()) |row| {
-        defer row.deinit();
         const blob = row.blob(0);
         if (blob.len != 32) return error.InvalidHash;
         var hash: [32]u8 = undefined;

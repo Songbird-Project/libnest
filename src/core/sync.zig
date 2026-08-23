@@ -150,7 +150,7 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
     const existing_hash_row = try conn.conn.row("SELECT hash FROM metadata", .{});
     if (existing_hash_row) |row| {
         defer row.deinit();
-        if (row.get(?[]const u8, 0)) |blob| {
+        if (row.nullableBlob(0)) |blob| {
             if (blob.len != 32) return error.InvalidHash;
             if (std.mem.eql(u8, blob, &db_hash)) {
                 try ctx.log(.Info, "{s} is up to date\n", .{conn.repo.name});
@@ -279,7 +279,7 @@ pub fn syncPackage(
         try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     }
 
-    client.downloadFromMirror(ctx, repo, pkg_filename, dest) catch |err| switch (err) {
+    client.downloadFromMirror(ctx, repo.*, pkg_filename, dest) catch |err| switch (err) {
         error.AllMirrorsFailed => {},
         else => return err,
     };

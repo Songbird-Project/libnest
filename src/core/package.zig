@@ -5,7 +5,7 @@ const RepoConn = @import("repo.zig").RepoConn;
 
 pub const Provider = struct {
     info: *PackageInfo,
-    conn: RepoConn,
+    conn: *RepoConn,
     id: i64,
 
     pub fn deinit(self: Provider, alloc: Allocator) void {
