@@ -65,7 +65,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    module.linkSystemLibrary("sqlite3", .{});
     module.addImport("zqlite", zqlite.module("zqlite"));
 
     const ini = b.dependency("ini", .{
