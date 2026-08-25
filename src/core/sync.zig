@@ -246,7 +246,9 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
     try conn.conn.commit();
 }
 
-pub fn syncPackages(ctx: Context, store_conn: StoreConn, providers: []package.Provider) !void {
+pub fn syncPackages(ctx: Context, providers: []package.Provider) !void {
+    const store_conn = ctx.store;
+
     try store_conn.transaction();
     errdefer store_conn.rollback();
     var stmts: RelationStmts = try .init(ctx, store_conn);
@@ -255,7 +257,6 @@ pub fn syncPackages(ctx: Context, store_conn: StoreConn, providers: []package.Pr
     defer ins.deinit();
     for (providers) |provider| try syncPackage(
         ctx,
-        store_conn,
         provider,
         stmts,
         ins,
@@ -266,11 +267,12 @@ pub fn syncPackages(ctx: Context, store_conn: StoreConn, providers: []package.Pr
 /// `syncPackage` requires that a valid transaction is already active
 pub fn syncPackage(
     ctx: Context,
-    store_conn: StoreConn,
     provider: package.Provider,
     stmts: RelationStmts,
     insert_stmt: PackageInsertStmt,
 ) !void {
+    const store_conn = ctx.store;
+
     var client = try download.CurlClient.init(ctx);
     defer client.deinit(ctx);
 
@@ -354,7 +356,7 @@ pub fn syncPackage(
     _ = try insert_stmt.step();
     const store_id = insert_stmt.int(0);
 
-    try ingest.ingestPackage(ctx, store_conn, &reader, store_id);
+    try ingest.ingestPackage(ctx, &reader, store_id);
     try persistRelations(store_id, pkg.*, stmts);
 
     try insert_stmt.reset();

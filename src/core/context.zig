@@ -1,7 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const RepoConn = @import("./repo.zig").RepoConn;
+const RepoConn = @import("repo.zig").RepoConn;
+const store = @import("../store/store.zig");
 const config = @import("config.zig").config;
 
 pub const LogLevel = enum(u8) { Debug, Info, Warn, Error, Fatal, None };
@@ -28,6 +29,7 @@ pub const Context = struct {
     io: Io,
     alloc: std.mem.Allocator,
 
+    store: store.StoreConn,
     repos: std.StringHashMap(RepoConn),
 
     log_options: LogOptions = .{},
@@ -36,16 +38,20 @@ pub const Context = struct {
     log_cb: *const fn (Io, LogLevel, []const u8) anyerror!void = defaultLogCb,
     select_cb: *const fn (Io, usize) anyerror!usize = defaultSelectCb,
 
-    pub fn init(alloc: Allocator, io: Io) Context {
+    pub fn init(alloc: Allocator, io: Io, path_options: PathOptions) !Context {
         return .{
             .io = io,
             .alloc = alloc,
 
+            .store = try store.newConn(io, alloc, path_options),
             .repos = .init(alloc),
+
+            .path_options = path_options,
         };
     }
 
     pub fn deinit(self: *Context) void {
+        self.store.close();
         var it = self.repos.valueIterator();
         while (it.next()) |conn| conn.deinit(self.*);
         self.repos.deinit();

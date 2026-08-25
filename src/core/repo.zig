@@ -9,8 +9,9 @@ const mem = @import("../utils/mem.zig");
 const comps: std.StaticStringMap(u8) = .initComptime(.{
     .{ ">", 0 },
     .{ "<", 1 },
-    .{ ">=", 2 },
-    .{ "<=", 3 },
+    .{ "=", 2 },
+    .{ ">=", 3 },
+    .{ "<=", 4 },
 });
 
 pub const Repo = struct {
@@ -398,6 +399,12 @@ pub fn getProviderWithDepsAll(ctx: Context, names: [][]const u8, constraints: ?[
     }
 
     for (names, 0..) |name, idx| {
+        const exists = if (try ctx.store.row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
+            defer row.deinit();
+            break :blk true;
+        } else false;
+        if (exists) continue;
+
         const constraint = if (constraints) |c| c[idx] else null;
         try ctx.log(.Info, "Resolving dependencies for '{s}'...\n", .{name});
         const resolved = try getProviderWithDepsRecursive(ctx, name, true, &seen, &selected, constraint);
@@ -409,6 +416,12 @@ pub fn getProviderWithDepsAll(ctx: Context, names: [][]const u8, constraints: ?[
 }
 
 pub fn getProviderWithDeps(ctx: Context, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
+    const exists = if (try ctx.store.row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
+        defer row.deinit();
+        break :blk true;
+    } else false;
+    if (exists) return;
+
     var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
     defer {
         var it = seen.valueIterator();
@@ -522,8 +535,9 @@ fn satisfiesConstraint(local: []const u8, constraint: []const u8) !bool {
     return switch (comp) {
         0 => res == 1,
         1 => res == -1,
-        2 => res >= 0,
-        3 => res <= 0,
+        2 => res == 0,
+        3 => res >= 0,
+        4 => res <= 0,
         else => unreachable,
     };
 }

@@ -3,7 +3,6 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const context = @import("../core/context.zig");
 const Context = context.Context;
-const store = @import("./store.zig");
 const archive = @import("../utils/archive.zig");
 
 const METADATA_FILES: std.StaticStringMap(void) = .initComptime(.{
@@ -41,7 +40,9 @@ pub const IngestResult = struct {
 };
 
 /// `ingestPackage` requires that a valid transaction is already active
-pub fn ingestPackage(ctx: Context, db: store.StoreConn, reader: *archive.Reader, id: i64) !void {
+pub fn ingestPackage(ctx: Context, reader: *archive.Reader, id: i64) !void {
+    const db = ctx.store;
+
     var hashes: std.StringHashMap([32]u8) = .init(ctx.alloc);
     defer hashes.deinit();
 

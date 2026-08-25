@@ -1,7 +1,9 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const package = @import("../core/package.zig");
-const Context = @import("../core/context.zig").Context;
+const context = @import("../core/context.zig");
+const Context = context.Context;
 const zqlite = @import("zqlite");
 
 pub const profile = @import("profile.zig");
@@ -36,16 +38,16 @@ const StoreObject = struct {
     created: std.Io.Timestamp,
 };
 
-pub fn newConn(ctx: Context) !StoreConn {
-    const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
-        ctx.path_options.root,
-        ctx.path_options.state,
+pub fn newConn(io: Io, alloc: Allocator, path_options: context.PathOptions) !StoreConn {
+    const path = try std.Io.Dir.path.joinZ(alloc, &.{
+        path_options.root,
+        path_options.state,
         "store.db",
     });
-    defer ctx.alloc.free(path);
+    defer alloc.free(path);
 
     if (std.Io.Dir.path.dirname(path)) |dir| {
-        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+        try std.Io.Dir.cwd().createDirPath(io, dir);
     }
 
     const flags = zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode;
@@ -164,7 +166,9 @@ pub fn objectPath(ctx: Context, hash: [32]u8) ![]u8 {
     });
 }
 
-pub fn clean(ctx: Context, store_conn: StoreConn) !struct { package_rows: usize, blobs: usize, bytes: i64 } {
+pub fn clean(ctx: Context) !struct { package_rows: usize, blobs: usize, bytes: i64 } {
+    const store_conn = ctx.store;
+
     try store_conn.transaction();
     errdefer store_conn.rollback();
 

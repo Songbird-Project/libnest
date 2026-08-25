@@ -1,11 +1,9 @@
 const std = @import("std");
 const Io = std.Io;
 const Context = @import("../core/context.zig").Context;
-const store = @import("store.zig");
-const StoreConn = store.StoreConn;
 
-pub fn new(store_db: StoreConn, name: []const u8) !i64 {
-    const row = try store_db.row(
+pub fn new(ctx: Context, name: []const u8) !i64 {
+    const row = try ctx.store.row(
         \\INSERT INTO profiles(name) VALUES (?1)
         \\ON CONFLICT(name) DO NOTHING
         \\RETURNING id;
@@ -15,8 +13,8 @@ pub fn new(store_db: StoreConn, name: []const u8) !i64 {
     return row.?.int(0);
 }
 
-pub fn getId(store_db: StoreConn, name: []const u8) !i64 {
-    const row = try store_db.row("SELECT * FROM profiles WHERE name = ?1", .{name});
+pub fn getId(ctx: Context, name: []const u8) !i64 {
+    const row = try ctx.store.row("SELECT * FROM profiles WHERE name = ?1", .{name});
 
     if (row) |r| {
         defer r.deinit();
@@ -26,8 +24,8 @@ pub fn getId(store_db: StoreConn, name: []const u8) !i64 {
     return error.ProfileNotFound;
 }
 
-pub fn getName(ctx: Context, store_db: StoreConn, id: i64) ![]const u8 {
-    const row = try store_db.row("SELECT * FROM profiles WHERE id = ?1", .{id});
+pub fn getName(ctx: Context, id: i64) ![]const u8 {
+    const row = try ctx.store.row("SELECT * FROM profiles WHERE id = ?1", .{id});
 
     if (row) |r| {
         defer r.deinit();

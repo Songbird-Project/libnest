@@ -6,8 +6,8 @@ const store = @import("store.zig");
 const StoreConn = store.StoreConn;
 const profile = @import("profile.zig");
 
-pub fn getId(store_conn: StoreConn, profile_id: i64, gen_num: i64) !i64 {
-    const id_row = try store_conn.row(
+pub fn getId(ctx: Context, profile_id: i64, gen_num: i64) !i64 {
+    const id_row = try ctx.store.row(
         "SELECT id FROM generations WHERE profile_id = ?1 AND number = ?2",
         .{ profile_id, gen_num },
     );
@@ -19,8 +19,8 @@ pub fn getId(store_conn: StoreConn, profile_id: i64, gen_num: i64) !i64 {
     return error.GenerationNotFound;
 }
 
-pub fn getNumber(store_conn: StoreConn, gen_id: i64) !struct { profile: i64, number: i64 } {
-    const num_row = try store_conn.row(
+pub fn getNumber(ctx: Context, gen_id: i64) !struct { profile: i64, number: i64 } {
+    const num_row = try ctx.store.row(
         "SELECT profile_id,number FROM generations WHERE id = ?1",
         .{gen_id},
     );
@@ -32,8 +32,8 @@ pub fn getNumber(store_conn: StoreConn, gen_id: i64) !struct { profile: i64, num
     return error.GenerationNotFound;
 }
 
-pub fn getCurrent(store_conn: StoreConn, profile_id: i64) !i64 {
-    const gen_row = try store_conn.row(
+pub fn getCurrent(ctx: Context, profile_id: i64) !i64 {
+    const gen_row = try ctx.store.row(
         "SELECT generation FROM profiles WHERE id = ?1",
         .{profile_id},
     );
@@ -43,8 +43,8 @@ pub fn getCurrent(store_conn: StoreConn, profile_id: i64) !i64 {
     return gen_row.?.int(0);
 }
 
-pub fn getLatest(store_conn: StoreConn, profile_id: i64) !i64 {
-    const latest_gen_row = try store_conn.row(
+pub fn getLatest(ctx: Context, profile_id: i64) !i64 {
+    const latest_gen_row = try ctx.store.row(
         "SELECT COALESCE(MAX(number), -2623) from generations WHERE profile_id = ?1",
         .{profile_id},
     );
@@ -56,7 +56,9 @@ pub fn getLatest(store_conn: StoreConn, profile_id: i64) !i64 {
     return num;
 }
 
-pub fn new(store_db: StoreConn, profile_id: i64) !i64 {
+pub fn new(ctx: Context, profile_id: i64) !i64 {
+    const store_db = ctx.store;
+
     try store_db.transaction();
     errdefer store_db.rollback();
 
@@ -80,12 +82,13 @@ pub fn new(store_db: StoreConn, profile_id: i64) !i64 {
 
 pub fn build(
     ctx: Context,
-    store_conn: StoreConn,
     gen_id: i64,
     providers: []package.Provider,
 ) !void {
-    const gen = try getNumber(store_conn, gen_id);
-    const profile_name = try profile.getName(ctx, store_conn, gen.profile);
+    const store_conn = ctx.store;
+
+    const gen = try getNumber(ctx, gen_id);
+    const profile_name = try profile.getName(ctx, gen.profile);
     defer ctx.alloc.free(profile_name);
 
     var num_buf: [32]u8 = undefined;
@@ -168,9 +171,11 @@ pub fn build(
     try store_conn.commit();
 }
 
-pub fn activate(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
-    const gen = try getNumber(store_conn, gen_id);
-    const profile_name = try profile.getName(ctx, store_conn, gen.profile);
+pub fn activate(ctx: Context, gen_id: i64) !void {
+    const store_conn = ctx.store;
+
+    const gen = try getNumber(ctx, gen_id);
+    const profile_name = try profile.getName(ctx, gen.profile);
     defer ctx.alloc.free(profile_name);
 
     var num_buf: [32]u8 = undefined;
@@ -229,8 +234,8 @@ pub fn protect(ctx: Context, store_conn: StoreConn, gen_id: i64, protected: bool
 }
 
 pub fn purgeUnsafe(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
-    const gen = try getNumber(store_conn, gen_id);
-    const profile_name = try profile.getName(ctx, store_conn, gen.profile);
+    const gen = try getNumber(ctx, gen_id);
+    const profile_name = try profile.getName(ctx, gen.profile);
     defer ctx.alloc.free(profile_name);
 
     try store_conn.exec("DELETE FROM generations WHERE id = ?1", .{gen_id});
@@ -278,9 +283,11 @@ pub fn purge(ctx: Context, store_conn: StoreConn, gen_id: i64) !void {
 
 /// Purge old generations from the profile
 /// Skips the current, previous and any protected generations
-pub fn purgeAll(ctx: Context, store_conn: StoreConn, profile_id: i64, older_than: u32) !void {
-    const current_gen = try getCurrent(store_conn, profile_id);
-    const profile_name = try profile.getName(ctx, store_conn, profile_id);
+pub fn purgeAll(ctx: Context, profile_id: i64, older_than: u32) !void {
+    const store_conn = ctx.store;
+
+    const current_gen = try getCurrent(ctx, profile_id);
+    const profile_name = try profile.getName(ctx, profile_id);
     defer ctx.alloc.free(profile_name);
 
     var gens = try store_conn.rows(
