@@ -145,7 +145,12 @@ pub const RepoConn = struct {
     }
 };
 
-pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Provider {
+pub fn getProvider(
+    ctx: Context,
+    name: []const u8,
+    explicit: bool,
+    selected: ?*std.StringHashMap(i64),
+) !package.Provider {
     var providers: std.ArrayList(struct { conn: *RepoConn, name: []const u8, id: i64 }) = .empty;
     defer {
         for (providers.items) |item| ctx.alloc.free(item.name);
@@ -193,17 +198,57 @@ pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Prov
         return error.ProviderNotFound;
     }
 
-    const selected = if (providers.items.len == 1) 0 else blk: {
-        try ctx.log(.Info, "There are {d} providers for '{s}', select which one you would like to use:\n", .{
-            providers.items.len,
-            name,
-        });
-        for (providers.items, 1..) |pkg, idx| {
-            try ctx.log(.None, "{d:>3}: {s}\n", .{ idx, pkg.name });
+    const selected_id = if (selected) |cache| blk: {
+        if (cache.get(name)) |id| {
+            for (providers.items) |p| {
+                if (p.id == id)
+                    break :blk id;
+            }
         }
-        break :blk try ctx.select(providers.items.len);
+
+        break :blk null;
+    } else null;
+
+    const provider = if (selected_id) |id| blk: {
+        for (providers.items) |provider| {
+            if (provider.id == id)
+                break :blk provider;
+        }
+
+        return error.ProviderNotFound;
+    } else blk: {
+        const index = if (providers.items.len == 1) 0 else select: {
+            try ctx.log(
+                .Info,
+                "There are {d} providers for '{s}', select which one you would like to use:\n",
+                .{ providers.items.len, name },
+            );
+
+            for (providers.items, 1..) |pkg, idx| {
+                try ctx.log(.None, "{d:>3}: {s}\n", .{ idx, pkg.name });
+            }
+
+            break :select try ctx.select(providers.items.len);
+        };
+
+        const provider = providers.items[index];
+
+        if (selected) |cache| {
+            try putSelected(ctx, cache, name, provider.id);
+            try putSelected(ctx, cache, provider.name, provider.id);
+
+            var rows = try provider.conn.conn.rows(
+                "SELECT name FROM provides WHERE package_id = ?1",
+                .{provider.id},
+            );
+            defer rows.deinit();
+            while (rows.next()) |row| {
+                try putSelected(ctx, cache, row.cString(0), provider.id);
+            }
+        }
+
+        break :blk provider;
     };
-    const provider = providers.items[selected];
 
     var row = (try provider.conn.conn.row("SELECT * FROM packages WHERE id = ?1", .{provider.id})).?;
     defer row.deinit();
@@ -328,6 +373,41 @@ pub fn getProvider(ctx: Context, name: []const u8, explicit: bool) !package.Prov
     return .{ .info = pkg, .conn = provider.conn, .id = id };
 }
 
+pub fn getProviderWithDepsAll(ctx: Context, names: [][]const u8, constraints: ?[]?[]const u8) ![]package.Provider {
+    var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
+    defer {
+        var it = seen.valueIterator();
+        while (it.next()) |n| ctx.alloc.free(n.*);
+        seen.deinit();
+    }
+
+    var selected: std.StringHashMap(i64) = .init(ctx.alloc);
+    defer {
+        var it = selected.keyIterator();
+        while (it.next()) |key| {
+            ctx.alloc.free(key.*);
+        }
+
+        selected.deinit();
+    }
+
+    var providers: std.ArrayList(package.Provider) = .empty;
+    errdefer {
+        for (providers.items) |provider| provider.deinit(ctx.alloc);
+        providers.deinit(ctx.alloc);
+    }
+
+    for (names, 0..) |name, idx| {
+        const constraint = if (constraints) |c| c[idx] else null;
+        try ctx.log(.Info, "Resolving dependencies for '{s}'...\n", .{name});
+        const resolved = try getProviderWithDepsRecursive(ctx, name, true, &seen, &selected, constraint);
+        defer ctx.alloc.free(resolved);
+        try providers.appendSlice(ctx.alloc, resolved);
+    }
+
+    return try providers.toOwnedSlice(ctx.alloc);
+}
+
 pub fn getProviderWithDeps(ctx: Context, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
     var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
     defer {
@@ -336,8 +416,18 @@ pub fn getProviderWithDeps(ctx: Context, name: []const u8, constraint: ?[]const 
         seen.deinit();
     }
 
+    var selected: std.StringHashMap(i64) = .init(ctx.alloc);
+    defer {
+        var it = selected.keyIterator();
+        while (it.next()) |key| {
+            ctx.alloc.free(key.*);
+        }
+
+        selected.deinit();
+    }
+
     try ctx.log(.Info, "Resolving dependencies for '{s}'...\n", .{name});
-    return try getProviderWithDepsRecursive(ctx, name, true, &seen, constraint);
+    return try getProviderWithDepsRecursive(ctx, name, true, &seen, &selected, constraint);
 }
 
 fn getProviderWithDepsRecursive(
@@ -345,9 +435,10 @@ fn getProviderWithDepsRecursive(
     name: []const u8,
     first: bool,
     seen: *std.AutoHashMap(i64, []const u8),
+    selected: *std.StringHashMap(i64),
     constraint: ?[]const u8,
 ) ![]package.Provider {
-    const current = try getProvider(ctx, name, first);
+    const current = try getProvider(ctx, name, first, selected);
 
     if (seen.get(current.id)) |existing| {
         if (constraint) |c| {
@@ -385,6 +476,7 @@ fn getProviderWithDepsRecursive(
             dep.name,
             false,
             seen,
+            selected,
             dep.constraint,
         );
         defer ctx.alloc.free(children);
@@ -392,6 +484,21 @@ fn getProviderWithDepsRecursive(
     }
 
     return try providers.toOwnedSlice(ctx.alloc);
+}
+
+fn putSelected(
+    ctx: Context,
+    selected: *std.StringHashMap(i64),
+    name: []const u8,
+    id: i64,
+) !void {
+    if (selected.contains(name))
+        return;
+
+    const key = try ctx.alloc.dupe(u8, name);
+    errdefer ctx.alloc.free(key);
+
+    try selected.put(key, id);
 }
 
 fn satisfiesConstraint(local: []const u8, constraint: []const u8) !bool {
