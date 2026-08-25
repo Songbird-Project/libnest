@@ -92,21 +92,25 @@ pub fn newConn(ctx: Context) !StoreConn {
         \\CREATE TABLE IF NOT EXISTS depends(
         \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
         \\  name TEXT NOT NULL,
+        \\  ver_constraint TEXT,
         \\  kind INTEGER NOT NULL DEFAULT 0 check(kind IN (0, 1, 2, 3))
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS provides(
         \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+        \\  ver_constraint TEXT,
         \\  name TEXT NOT NULL
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS conflicts(
         \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+        \\  ver_constraint TEXT,
         \\  name TEXT NOT NULL
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS replaces(
         \\  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+        \\  ver_constraint TEXT,
         \\  name TEXT NOT NULL
         \\);
         \\

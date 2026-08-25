@@ -70,6 +70,18 @@ pub fn initPackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInsertStmt
     );
 }
 
+pub fn initStorePackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInsertStmt {
+    return try prepare(
+        ctx,
+        conn,
+        \\INSERT INTO packages(name, epoch, version, release, explicit, arch, repo)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        \\ON CONFLICT(name, epoch, version, release) DO NOTHING
+        \\RETURNING id;
+        ,
+    );
+}
+
 pub fn syncAllRepos(ctx: Context) !void {
     var it = ctx.repos.valueIterator();
     while (it.next()) |conn| {
@@ -239,7 +251,7 @@ pub fn syncPackages(ctx: Context, store_conn: StoreConn, providers: []package.Pr
     errdefer store_conn.rollback();
     var stmts: RelationStmts = try .init(ctx, store_conn);
     defer stmts.deinit();
-    const ins = try initPackageInsertStmt(ctx, store_conn);
+    const ins = try initStorePackageInsertStmt(ctx, store_conn);
     defer ins.deinit();
     for (providers) |provider| try syncPackage(
         ctx,
