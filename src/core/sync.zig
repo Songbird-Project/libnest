@@ -58,9 +58,9 @@ pub fn initPackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInsertStmt
     return try prepare(
         ctx,
         conn,
-        \\INSERT INTO packages(name, epoch, version, release, explicit, arch, repo)
+        \\INSERT INTO packages(name, arch, epoch, version, release, explicit, repo)
         \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        \\ON CONFLICT(name) DO UPDATE SET
+        \\ON CONFLICT(name, arch) DO UPDATE SET
         \\  epoch = excluded.epoch,
         \\  version = excluded.version,
         \\  release = excluded.release,
@@ -74,9 +74,9 @@ pub fn initStorePackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInser
     return try prepare(
         ctx,
         conn,
-        \\INSERT INTO packages(name, epoch, version, release, explicit, arch, repo)
+        \\INSERT INTO packages(name, arch, epoch, version, release, explicit, repo)
         \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        \\ON CONFLICT(name, epoch, version, release) DO NOTHING
+        \\ON CONFLICT(name, arch, epoch, version, release) DO NOTHING
         \\RETURNING id;
         ,
     );
@@ -177,9 +177,9 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
     const sync_stmt = try prepare(
         ctx,
         conn.conn,
-        \\INSERT INTO packages(name, checksum, epoch, version, release)
-        \\VALUES (?1, ?2, ?3, ?4, ?5)
-        \\ON CONFLICT(name) DO UPDATE SET
+        \\INSERT INTO packages(name, arch, checksum, epoch, version, release)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        \\ON CONFLICT(name, arch) DO UPDATE SET
         \\  checksum = excluded.checksum,
         \\  epoch = excluded.epoch,
         \\  version = excluded.version,
@@ -226,6 +226,7 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
 
         try sync_stmt.bind(.{
             pkg_info.name,
+            pkg_info.arch,
             if (pkg_info.checksum) |sum| &sum else null,
             pkg_info.epoch,
             pkg_info.version,
@@ -246,7 +247,7 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
 }
 
 pub fn syncPackages(ctx: Context, providers: []package.Provider) !void {
-    const store_conn = ctx.store;
+    const store_conn = ctx.getStore();
 
     try store_conn.transaction();
     errdefer store_conn.rollback();
@@ -270,7 +271,7 @@ pub fn syncPackage(
     stmts: RelationStmts,
     insert_stmt: PackageInsertStmt,
 ) !void {
-    const store_conn = ctx.store;
+    const store_conn = ctx.getStore();
 
     var client = try download.CurlClient.init(ctx);
     defer client.deinit(ctx);

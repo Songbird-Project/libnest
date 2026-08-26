@@ -76,11 +76,12 @@ pub const RepoConn = struct {
             \\CREATE TABLE IF NOT EXISTS packages(
             \\  id INTEGER PRIMARY KEY,
             \\  name TEXT NOT NULL,
+            \\  arch TEXT NOT NULL,
             \\  checksum BLOB,
             \\  epoch INTEGER NOT NULL DEFAULT 0,
             \\  version TEXT NOT NULL,
             \\  release TEXT,
-            \\  UNIQUE(name)
+            \\  UNIQUE(name, arch)
             \\);
             \\
             \\CREATE TABLE IF NOT EXISTS depends(
@@ -270,19 +271,19 @@ pub fn getProvider(
     const id = row.int(0);
     const pkg = try ctx.alloc.create(package.PackageInfo);
 
-    const blob = row.blob(2);
+    const blob = row.blob(3);
     if (blob.len != 32) return error.InvalidHash;
     var hash: [32]u8 = undefined;
     @memcpy(&hash, blob);
 
     pkg.* = .{
         .name = try ctx.alloc.dupe(u8, row.cString(1)),
-        .arch = try ctx.alloc.dupe(u8, provider.conn.repo.arch),
+        .arch = try ctx.alloc.dupe(u8, row.cString(2)),
         .checksum = hash,
         .repo = try ctx.alloc.dupe(u8, provider.conn.repo.name),
-        .epoch = @intCast(row.int(3)),
-        .version = try ctx.alloc.dupe(u8, row.cString(4)),
-        .release = if (row.nullableCString(5)) |sum| try ctx.alloc.dupe(u8, sum) else null,
+        .epoch = @intCast(row.int(4)),
+        .version = try ctx.alloc.dupe(u8, row.cString(5)),
+        .release = if (row.nullableCString(6)) |sum| try ctx.alloc.dupe(u8, sum) else null,
         .explicit = explicit,
     };
 
@@ -425,7 +426,7 @@ pub fn getProviderWithDepsAll(ctx: Context, names: [][]const u8, constraints: ?[
     }
 
     for (names, 0..) |name, idx| {
-        const exists = if (try ctx.store.row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
+        const exists = if (try ctx.getStore().row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
             defer row.deinit();
             break :blk true;
         } else false;
@@ -442,11 +443,11 @@ pub fn getProviderWithDepsAll(ctx: Context, names: [][]const u8, constraints: ?[
 }
 
 pub fn getProviderWithDeps(ctx: Context, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
-    const exists = if (try ctx.store.row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
+    const exists = if (try ctx.getStore().row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
         defer row.deinit();
         break :blk true;
     } else false;
-    if (exists) return;
+    if (exists) return &.{};
 
     var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
     defer {
