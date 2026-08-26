@@ -99,8 +99,8 @@ pub const CurlClient = struct {
             self.download(ctx, url, dest) catch {
                 try ctx.log(
                     .Error,
-                    "Failed to download repo file for '{s}' from mirror '{s}'\n",
-                    .{ repo.name, url },
+                    "Failed to download file for '{s}' from mirror '{s}'\n",
+                    .{ filename, url },
                 );
                 continue;
             };
