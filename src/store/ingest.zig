@@ -76,7 +76,7 @@ pub fn ingestPackage(ctx: Context, reader: *archive.Reader, id: i64) !void {
                 );
                 try db.exec(
                     \\INSERT INTO blobs(hash, size, created)
-                    \\VALUES(?1, ?2, unixepoch())
+                    \\VALUES(?1, ?2, unixepoch()) ON CONFLICT DO NOTHING
                 , .{ if (result.hash) |hash| &hash else null, result.size });
                 try db.exec(
                     \\INSERT INTO files(package_id, path, hash, target, mode)

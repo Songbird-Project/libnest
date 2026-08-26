@@ -346,11 +346,11 @@ pub fn syncPackage(
 
     try insert_stmt.bind(.{
         pkg.name,
+        pkg.arch,
         pkg.epoch,
         pkg.version,
         pkg.release,
         pkg.explicit,
-        pkg.arch,
         pkg.repo,
     });
     _ = try insert_stmt.step();
