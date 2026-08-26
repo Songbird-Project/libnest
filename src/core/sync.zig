@@ -83,9 +83,8 @@ pub fn initStorePackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInser
 }
 
 pub fn syncAllRepos(ctx: Context) !void {
-    var it = ctx.repos.valueIterator();
-    while (it.next()) |conn| {
-        try syncRepo(ctx, conn);
+    for (ctx.repos.items) |conn| {
+        try syncRepo(ctx, conn.*);
     }
 }
 

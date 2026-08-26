@@ -18,6 +18,7 @@ pub const Repo = struct {
     name: []const u8,
     arch: []const u8,
     mirrors: []const []const u8,
+    priority: i64,
     enabled: bool = true,
 };
 
@@ -45,7 +46,17 @@ pub const RepoConn = struct {
         }
 
         const flags = zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode;
-        const conn = try zqlite.open(path, flags);
+        const conn = zqlite.open(path, flags) catch |err| switch (err) {
+            error.Busy => {
+                try ctx.log(
+                    .Error,
+                    "Failed to open the '{s} {s}' repo db, another operation is probably in progress\n",
+                    .{ repo.name, repo.arch },
+                );
+                return err;
+            },
+            else => return err,
+        };
         errdefer conn.close();
 
         try conn.execNoArgs(
@@ -132,65 +143,66 @@ pub const RepoConn = struct {
 
         const repo_ptr = try ctx.alloc.create(Repo);
         repo_ptr.* = repo;
-        const r: RepoConn = .{
-            .conn = conn,
-            .repo = repo_ptr,
-        };
 
-        try ctx.repos.put(repo.name, r);
+        const conn_ptr = try ctx.alloc.create(RepoConn);
+        conn_ptr.* = .{ .conn = conn, .repo = repo_ptr };
+
+        try ctx.repos.append(ctx.alloc, conn_ptr);
     }
 
-    pub fn deinit(self: *RepoConn, ctx: Context) void {
+    pub fn deinit(self: *RepoConn, alloc: Allocator) void {
         self.conn.close();
-        ctx.alloc.destroy(self.repo);
+        alloc.destroy(self.repo);
     }
 };
+
+pub fn openAll(ctx: *Context, repos: []Repo) !void {
+    for (repos) |repo| try RepoConn.open(ctx, repo);
+    std.mem.sort(*RepoConn, ctx.repos.items, {}, lessThanPriority);
+}
+
+fn lessThanPriority(_: void, a: *RepoConn, b: *RepoConn) bool {
+    return a.repo.priority < b.repo.priority;
+}
 
 pub fn getProvider(
     ctx: Context,
     name: []const u8,
     explicit: bool,
     selected: ?*std.StringHashMap(i64),
+    provider_constraint: ?[]const u8,
 ) !package.Provider {
-    var providers: std.ArrayList(struct { conn: *RepoConn, name: []const u8, id: i64 }) = .empty;
+    var providers: std.ArrayList(struct {
+        conn: *RepoConn,
+        name: []const u8,
+        id: i64,
+        version: ?[]const u8 = null,
+    }) = .empty;
     defer {
-        for (providers.items) |item| ctx.alloc.free(item.name);
+        for (providers.items) |item| {
+            ctx.alloc.free(item.name);
+            if (item.version) |ver| ctx.alloc.free(ver);
+        }
         providers.deinit(ctx.alloc);
     }
 
-    var repo_it = ctx.repos.valueIterator();
-    while (repo_it.next()) |repo| {
-        const pkg_row = try repo.conn.row("SELECT name,id FROM packages WHERE name = ?1", .{name});
-        if (pkg_row) |r| {
-            defer r.deinit();
+    for (ctx.repos.items) |repo| {
+        var rows = try repo.conn.rows(
+            \\SELECT id, name, NULL AS ver_constraint FROM packages WHERE name = ?1
+            \\UNION
+            \\SELECT pk.id, pk.name, p.ver_constraint FROM provides p
+            \\  JOIN packages pk ON p.package_id = pk.id
+            \\WHERE p.name = ?1
+        , .{name});
+        defer rows.deinit();
+
+        while (rows.next()) |r| {
             try providers.append(ctx.alloc, .{
                 .conn = repo,
-                .name = try ctx.alloc.dupe(u8, r.cString(0)),
-                .id = r.int(1),
+                .name = try ctx.alloc.dupe(u8, r.cString(1)),
+                .id = r.int(0),
+                .version = if (r.nullableCString(2)) |v| try ctx.alloc.dupe(u8, v) else null,
             });
-        }
-
-        var provider_rows = try repo.conn.rows("SELECT package_id FROM provides WHERE name = ?1", .{name});
-        defer provider_rows.deinit();
-
-        blk: while (provider_rows.next()) |r| {
-            for (providers.items) |p| {
-                if (p.id == r.int(0)) continue :blk;
-            }
-
-            const p = try repo.conn.row("SELECT name FROM packages WHERE id = ?1", .{r.int(0)});
-            if (p) |pr| {
-                defer pr.deinit();
-                for (providers.items) |item| {
-                    if (std.mem.eql(u8, item.name, pr.cString(0))) continue :blk;
-                }
-
-                try providers.append(ctx.alloc, .{
-                    .conn = repo,
-                    .name = try ctx.alloc.dupe(u8, pr.cString(0)),
-                    .id = r.int(0),
-                });
-            }
         }
     }
 
@@ -273,6 +285,20 @@ pub fn getProvider(
         .release = if (row.nullableCString(5)) |sum| try ctx.alloc.dupe(u8, sum) else null,
         .explicit = explicit,
     };
+
+    if (provider_constraint) |c| {
+        const local = if (provider.version) |pv|
+            stripOperator(pv)
+        else
+            try formatEVR(ctx.alloc, pkg.epoch, pkg.version, pkg.release);
+        defer if (provider.version == null) ctx.alloc.free(local);
+
+        if (!try satisfiesConstraint(local, c)) {
+            pkg.deinit(ctx.alloc);
+            ctx.alloc.destroy(pkg);
+            return error.ConflictingDependencies;
+        }
+    }
 
     var depends: std.ArrayList(package.Dependency) = .empty;
     errdefer {
@@ -451,28 +477,14 @@ fn getProviderWithDepsRecursive(
     selected: *std.StringHashMap(i64),
     constraint: ?[]const u8,
 ) ![]package.Provider {
-    const current = try getProvider(ctx, name, first, selected);
+    const current = try getProvider(ctx, name, first, selected, constraint);
 
-    if (seen.get(current.id)) |existing| {
-        if (constraint) |c| {
-            if (!try satisfiesConstraint(existing, c)) {
-                current.deinit(ctx.alloc);
-                return error.ConflictingDependencies;
-            }
-        }
-
+    if (seen.get(current.id)) |_| {
         current.deinit(ctx.alloc);
         return &.{};
     }
 
-    if (constraint) |c| {
-        if (!try satisfiesConstraint(current.info.version, c)) {
-            current.deinit(ctx.alloc);
-            return error.ConflictingDependencies;
-        }
-    }
-
-    const current_version = try ctx.alloc.dupe(u8, current.info.version);
+    const current_version = try formatEVR(ctx.alloc, current.info.epoch, current.info.version, current.info.release);
     try seen.put(current.id, current_version);
 
     var providers: std.ArrayList(package.Provider) = .empty;
@@ -497,6 +509,19 @@ fn getProviderWithDepsRecursive(
     }
 
     return try providers.toOwnedSlice(ctx.alloc);
+}
+
+fn stripOperator(s: []const u8) []const u8 {
+    if (s.len >= 2 and comps.get(s[0..2]) != null) return s[2..];
+    if (s.len >= 1 and comps.get(s[0..1]) != null) return s[1..];
+    return s;
+}
+
+fn formatEVR(alloc: std.mem.Allocator, epoch: u32, ver: []const u8, release: ?[]const u8) ![]u8 {
+    return if (release) |r|
+        std.fmt.allocPrint(alloc, "{d}:{s}-{s}", .{ epoch, ver, r })
+    else
+        std.fmt.allocPrint(alloc, "{d}:{s}", .{ epoch, ver });
 }
 
 fn putSelected(
