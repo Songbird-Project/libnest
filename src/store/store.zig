@@ -83,7 +83,7 @@ pub fn open(ctx: Context) !StoreConn {
         \\  explicit INTEGER NOT NULL DEFAULT 1 check(explicit IN (0, 1)),
         \\  arch TEXT NOT NULL,
         \\  repo TEXT NOT NULL,
-        \\  UNIQUE(name, epoch, version, release)
+        \\  UNIQUE(name, arch, epoch, version, release)
         \\);
         \\
         \\CREATE TABLE IF NOT EXISTS blobs(
@@ -177,7 +177,7 @@ pub fn objectPath(ctx: Context, hash: [32]u8) ![]u8 {
 }
 
 pub fn clean(ctx: Context) !struct { package_rows: usize, blobs: usize, bytes: i64 } {
-    const store_conn = ctx.store;
+    const store_conn = ctx.getStore();
 
     try store_conn.transaction();
     errdefer store_conn.rollback();

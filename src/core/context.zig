@@ -29,7 +29,7 @@ pub const Context = struct {
     io: Io,
     alloc: std.mem.Allocator,
 
-    store: store.StoreConn = undefined,
+    store: ?store.StoreConn = null,
     repos: std.ArrayList(*RepoConn) = .empty,
 
     log_options: LogOptions = .{},
@@ -46,12 +46,16 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        self.store.close();
+        if (self.store) |conn| conn.close();
         for (self.repos.items) |repo| {
             repo.deinit(self.alloc);
             self.alloc.destroy(repo);
         }
         self.repos.deinit(self.alloc);
+    }
+
+    pub fn getStore(self: Context) store.StoreConn {
+        return self.store.?;
     }
 
     pub fn log(
@@ -119,7 +123,11 @@ fn defaultSelectCb(io: Io, items: usize) !usize {
         _ = try stdin.streamDelimiter(&input, '\n');
         const trimmed = std.mem.trim(u8, input.buffered(), " \t\r\n");
 
-        const val = std.fmt.parseInt(usize, trimmed, 10) catch continue;
+        const val = std.fmt.parseInt(usize, trimmed, 10) catch {
+            _ = try stdin.discardRemaining();
+            try input.flush();
+            continue;
+        };
 
         if (val <= 0 or val > items) continue;
 
