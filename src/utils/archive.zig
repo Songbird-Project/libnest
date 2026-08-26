@@ -27,6 +27,7 @@ pub fn ingestFile(ctx: Ctx, reader: *Reader, path: []const u8, mode: u32) !inges
     });
     defer ctx.alloc.free(tmp_path);
 
+    try Io.Dir.cwd().createDirPath(ctx.io, ctx.path_options.store);
     const tmp_file = try Io.Dir.cwd().createFile(ctx.io, tmp_path, .{});
     defer tmp_file.close(ctx.io);
     var tmp_buf: [4096]u8 = undefined;
