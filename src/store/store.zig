@@ -38,20 +38,30 @@ const StoreObject = struct {
     created: std.Io.Timestamp,
 };
 
-pub fn newConn(io: Io, alloc: Allocator, path_options: context.PathOptions) !StoreConn {
-    const path = try std.Io.Dir.path.joinZ(alloc, &.{
-        path_options.root,
-        path_options.state,
-        "store.db",
+pub fn open(ctx: Context) !StoreConn {
+    const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
+        ctx.path_options.root,
+        ctx.path_options.state,
+        "system.db",
     });
-    defer alloc.free(path);
+    defer ctx.alloc.free(path);
 
     if (std.Io.Dir.path.dirname(path)) |dir| {
-        try std.Io.Dir.cwd().createDirPath(io, dir);
+        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
     }
 
     const flags = zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode;
-    const conn = try zqlite.open(path, flags);
+    const conn = zqlite.open(path, flags) catch |err| switch (err) {
+        error.Busy => {
+            try ctx.log(
+                .Error,
+                "Failed to open the 'system' db, another operation is probably in progress\n",
+                .{},
+            );
+            return err;
+        },
+        else => return err,
+    };
     errdefer conn.close();
 
     try conn.execNoArgs(
