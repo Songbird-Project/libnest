@@ -10,7 +10,7 @@ pub const store = @import("store/store.zig");
 
 pub const download = @import("net/download.zig");
 
-pub const Internal = struct {
+pub const internal = struct {
     pub const Parse = struct {
         pub const desc = @import("parse/desc.zig");
         // pub const pkginfo = @import("parse/pkginfo.zig");

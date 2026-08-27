@@ -25,7 +25,7 @@ pub fn dupeSlice(comptime T: type, alloc: std.mem.Allocator, slices: []const T) 
     return new_slices;
 }
 
-pub fn freeSlice(alloc: std.mem.Allocator, slices: anytype) void {
-    for (slices) |slice| alloc.free(slice);
-    alloc.free(slices);
+pub fn freeSlice(alloc: std.mem.Allocator, items: anytype) void {
+    for (items) |item| alloc.free(item);
+    alloc.free(items);
 }
