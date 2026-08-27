@@ -22,12 +22,13 @@ pub fn ingestFile(ctx: Ctx, reader: *Reader, path: []const u8, mode: u32) !inges
     const tmp_name = try std.fmt.allocPrint(ctx.alloc, ".tmp-{d}", .{rand.int(u8)});
     defer ctx.alloc.free(tmp_name);
     const tmp_path = try Io.Dir.path.join(ctx.alloc, &.{
+        ctx.path_options.root,
         ctx.path_options.store,
         tmp_name,
     });
     defer ctx.alloc.free(tmp_path);
 
-    try Io.Dir.cwd().createDirPath(ctx.io, ctx.path_options.store);
+    try Io.Dir.cwd().createDirPath(ctx.io, Io.Dir.path.dirname(tmp_path).?);
     const tmp_file = try Io.Dir.cwd().createFile(ctx.io, tmp_path, .{});
     defer tmp_file.close(ctx.io);
     var tmp_buf: [4096]u8 = undefined;

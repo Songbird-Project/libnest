@@ -169,6 +169,7 @@ pub fn objectPath(ctx: Context, hash: [32]u8) ![]u8 {
     var buf: [64]u8 = undefined;
     const hex = std.fmt.bufPrint(&buf, "{x}", .{hash}) catch unreachable;
     return try std.Io.Dir.path.join(ctx.alloc, &.{
+        ctx.path_options.root,
         ctx.path_options.store,
         "blobs",
         hex[0..3],

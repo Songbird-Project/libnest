@@ -63,18 +63,18 @@ pub fn new(ctx: Context, profile_id: i64) !i64 {
     errdefer store_db.rollback();
 
     const gen_number_row = try store_db.row(
-        "SELECT COALESCE(MAX(number), 1) + 1 from generations WHERE profile_id = ?1",
+        "SELECT COALESCE(MAX(number), 0) + 1 from generations WHERE profile_id = ?1",
         .{profile_id},
     );
-    defer gen_number_row.?.deinit();
     const gen_number = gen_number_row.?.int(0);
+    gen_number_row.?.deinit();
 
     const gen_id_row = try store_db.row(
         \\INSERT INTO generations(profile_id, number, created)
         \\VALUES (?1, ?2, unixepoch()) RETURNING id;
     , .{ profile_id, gen_number });
-    defer gen_id_row.?.deinit();
     const gen_id = gen_id_row.?.int(0);
+    gen_id_row.?.deinit();
 
     try store_db.commit();
     return gen_id;
@@ -116,18 +116,19 @@ pub fn build(
     for (providers) |provider| {
         const id_row = try store_conn.row("SELECT id FROM packages WHERE name = ?1", .{provider.info.name});
         if (id_row == null) return error.CorruptStore;
-        defer id_row.?.deinit();
-
-        var rows = try store_conn.rows(
-            "SELECT path,hash,target,mode FROM files WHERE package_id = ?1",
-            .{id_row.?.int(0)},
-        );
-        defer rows.deinit();
+        const id = id_row.?.int(0);
+        id_row.?.deinit();
 
         try store_conn.exec(
             "INSERT INTO gen_entries(gen_id, package_id) VALUES(?1, ?2)",
-            .{ gen_id, id_row.?.int(0) },
+            .{ gen_id, id },
         );
+
+        var rows = try store_conn.rows(
+            "SELECT path,hash,target,mode FROM files WHERE package_id = ?1",
+            .{id},
+        );
+        defer rows.deinit();
 
         while (rows.next()) |row| {
             var dest = try Io.Dir.path.join(ctx.alloc, &.{ gen_dir, row.cString(0) });
