@@ -17,18 +17,17 @@ pub fn build(b: *std.Build) void {
         "skip-tests",
         "Skip testing and just build",
     ) orelse false;
-
-    const config_path = b.option(
+    const name = b.option(
         []const u8,
-        "config",
-        "Path to the libnest .zon config file",
-    ) orelse "libnest.zon";
+        "name",
+        "The name of the frontend",
+    ) orelse "libnest";
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const config_cwd: std.Build.LazyPath = .{ .cwd_relative = config_path };
-    const config_mod = b.createModule(.{ .root_source_file = config_cwd });
+    const options = b.addOptions();
+    options.addOption([]const u8, "name", name);
 
     const archive_c = b.addTranslateC(.{
         .root_source_file = b.path("lib/archive.h"),
@@ -47,12 +46,9 @@ pub fn build(b: *std.Build) void {
                 .name = "archive_c",
                 .module = archive_c.createModule(),
             },
-            .{
-                .name = "config",
-                .module = config_mod,
-            },
         },
     });
+    module.addOptions("config", options);
 
     const curl = b.dependency("curl", .{
         .target = target,
