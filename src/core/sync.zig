@@ -189,6 +189,7 @@ pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
         \\RETURNING id;
         ,
     );
+    defer sync_stmt.deinit();
 
     var stmts: RelationStmts = try .init(ctx, conn.conn);
     defer stmts.deinit();

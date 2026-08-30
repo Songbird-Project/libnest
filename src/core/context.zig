@@ -47,11 +47,16 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         if (self.store) |conn| conn.close();
+        self.closeRepoConns();
+        self.repos.deinit(self.alloc);
+    }
+
+    pub fn closeRepoConns(self: *Context) void {
         for (self.repos.items) |repo| {
             repo.deinit(self.alloc);
             self.alloc.destroy(repo);
         }
-        self.repos.deinit(self.alloc);
+        self.repos.clearRetainingCapacity();
     }
 
     pub fn getStore(self: Context) store.StoreConn {
@@ -120,17 +125,17 @@ fn defaultSelectCb(io: Io, items: usize) !usize {
         try w.print("Select [1-{d}]: ", .{items});
         try w.flush();
 
+        input.end = 0;
+
         _ = try stdin.streamDelimiter(&input, '\n');
         const trimmed = std.mem.trim(u8, input.buffered(), " \t\r\n");
 
         const val = std.fmt.parseInt(usize, trimmed, 10) catch {
             _ = try stdin.discardRemaining();
-            try input.flush();
             continue;
         };
 
-        if (val <= 0 or val > items) continue;
-
+        if (val == 0 or val > items) continue;
         return val - 1;
     }
 }
