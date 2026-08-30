@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const RepoConn = @import("repo.zig").RepoConn;
 const store = @import("../store/store.zig");
-const config = @import("config.zig").config;
+const config = @import("config");
 
 pub const LogLevel = enum(u8) { Debug, Info, Warn, Error, Fatal, None };
 
