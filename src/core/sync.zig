@@ -1,7 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
-const r = @import("repo.zig");
-const RepoConn = r.RepoConn;
+const Allocator = std.mem.Allocator;
 const StoreConn = @import("../store/store.zig").StoreConn;
 const download = @import("../net/download.zig");
 const Context = @import("context.zig").Context;
@@ -54,22 +53,6 @@ const RelationStmts = struct {
 
 const PackageInsertStmt = zqlite.Stmt;
 
-pub fn initPackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInsertStmt {
-    return try prepare(
-        ctx,
-        conn,
-        \\INSERT INTO packages(name, arch, epoch, version, release, explicit, repo)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        \\ON CONFLICT(name, arch) DO UPDATE SET
-        \\  epoch = excluded.epoch,
-        \\  version = excluded.version,
-        \\  release = excluded.release,
-        \\  explicit = excluded.explicit
-        \\RETURNING id;
-        ,
-    );
-}
-
 pub fn initStorePackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInsertStmt {
     return try prepare(
         ctx,
@@ -80,171 +63,6 @@ pub fn initStorePackageInsertStmt(ctx: Context, conn: zqlite.Conn) !PackageInser
         \\RETURNING id;
         ,
     );
-}
-
-pub fn syncAllRepos(ctx: Context) !void {
-    for (ctx.repos.items) |conn| {
-        try syncRepo(ctx, conn.*);
-    }
-}
-
-pub fn syncRepo(ctx: Context, conn: RepoConn) !void {
-    const repo = conn.repo;
-
-    var client = try download.CurlClient.init(ctx);
-    defer client.deinit(ctx);
-
-    const db_name = try std.fmt.allocPrint(
-        ctx.alloc,
-        "{s}-{s}.db",
-        .{ repo.name, repo.arch },
-    );
-    defer ctx.alloc.free(db_name);
-    const dest = try std.Io.Dir.path.join(ctx.alloc, &.{
-        ctx.path_options.root,
-        ctx.path_options.cache,
-        "db",
-        db_name,
-    });
-    defer ctx.alloc.free(dest);
-
-    if (std.Io.Dir.path.dirname(dest)) |dir| {
-        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
-    }
-
-    var db_name_buf: [128]u8 = undefined;
-    const db_filename = try std.fmt.bufPrint(
-        &db_name_buf,
-        "{s}.db",
-        .{repo.name},
-    );
-    client.downloadFromMirror(ctx, conn, db_filename, dest) catch |err| switch (err) {
-        error.AllMirrorsFailed => {},
-        else => return err,
-    };
-
-    var reader = try archive.Reader.init();
-    defer reader.deinit();
-
-    const db_file = std.Io.Dir.cwd().openFile(
-        ctx.io,
-        dest,
-        .{},
-    ) catch |err| switch (err) {
-        error.FileNotFound => {
-            try ctx.log(
-                .Error,
-                "Failed to download repo file for '{s}'\n",
-                .{repo.name},
-            );
-            return err;
-        },
-        else => return err,
-    };
-    defer db_file.close(ctx.io);
-
-    var db_hasher: std.crypto.hash.Blake3 = .init(.{});
-    var reader_buf: [4096]u8 = undefined;
-    var db_reader = db_file.reader(ctx.io, &reader_buf);
-    const io_reader = &db_reader.interface;
-
-    var db_buf: [4096]u8 = undefined;
-    while (true) {
-        const bytes = try io_reader.readSliceShort(&db_buf);
-        if (bytes <= 0) break;
-        db_hasher.update(db_buf[0..bytes]);
-    }
-
-    var db_hash: [32]u8 = undefined;
-    db_hasher.final(&db_hash);
-
-    const existing_hash_row = try conn.conn.row("SELECT hash FROM metadata", .{});
-    if (existing_hash_row) |row| {
-        defer row.deinit();
-        if (row.nullableBlob(0)) |blob| {
-            if (blob.len != 32) return error.InvalidHash;
-            if (std.mem.eql(u8, blob, &db_hash)) {
-                try ctx.log(.Info, "{s} is up to date\n", .{conn.repo.name});
-                return;
-            }
-        }
-    }
-
-    try db_reader.seekTo(0);
-    try reader.openFd(db_file.handle);
-    var buf: [16384]u8 = undefined;
-
-    const sync_stmt = try prepare(
-        ctx,
-        conn.conn,
-        \\INSERT INTO packages(name, arch, checksum, epoch, version, release)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-        \\ON CONFLICT(name, arch) DO UPDATE SET
-        \\  checksum = excluded.checksum,
-        \\  epoch = excluded.epoch,
-        \\  version = excluded.version,
-        \\  release = excluded.release
-        \\WHERE vercmp(excluded.epoch, excluded.version, excluded.release,
-        \\             packages.epoch, packages.version, packages.release) > 0
-        \\RETURNING id;
-        ,
-    );
-    defer sync_stmt.deinit();
-
-    var stmts: RelationStmts = try .init(ctx, conn.conn);
-    defer stmts.deinit();
-
-    try conn.conn.transaction();
-    errdefer conn.conn.rollback();
-
-    var arena: std.heap.ArenaAllocator = .init(ctx.alloc);
-    defer arena.deinit();
-
-    var contents: std.ArrayList(u8) = .empty;
-    defer contents.deinit(ctx.alloc);
-
-    while (try reader.nextEntry()) |entry| {
-        contents.clearRetainingCapacity();
-        defer _ = arena.reset(.retain_capacity);
-
-        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
-        if (!std.mem.eql(u8, std.Io.Dir.path.basename(path), "desc")) continue;
-
-        while (true) {
-            const read = try reader.readData(&buf);
-            if (read <= 0) break;
-            try contents.appendSlice(ctx.alloc, buf[0..read]);
-        }
-
-        const pkg_info = try desc.parse(
-            arena.allocator(),
-            repo.name,
-            contents.items,
-        );
-
-        if (!std.mem.eql(u8, pkg_info.arch, repo.arch) and
-            !std.mem.eql(u8, pkg_info.arch, "any")) continue;
-
-        try sync_stmt.bind(.{
-            pkg_info.name,
-            pkg_info.arch,
-            if (pkg_info.checksum) |sum| &sum else null,
-            pkg_info.epoch,
-            pkg_info.version,
-            pkg_info.release,
-        });
-        const row = try sync_stmt.step();
-
-        if (row) {
-            const id = sync_stmt.int(0);
-            try persistRelations(id, pkg_info, stmts);
-        }
-
-        try sync_stmt.reset();
-    }
-
-    try conn.conn.exec("UPDATE metadata SET last_refresh = unixepoch(), hash = ?1", .{&db_hash});
-    try conn.conn.commit();
 }
 
 pub fn syncPackages(ctx: Context, providers: []package.Provider) !void {
