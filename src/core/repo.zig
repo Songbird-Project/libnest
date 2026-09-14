@@ -4,15 +4,9 @@ const zqlite = @import("zqlite");
 const Context = @import("context.zig").Context;
 const package = @import("package.zig");
 const version = @import("../utils/version.zig");
-const mem = @import("../utils/mem.zig");
-
-const comps: std.StaticStringMap(u8) = .initComptime(.{
-    .{ ">", 0 },
-    .{ "<", 1 },
-    .{ "=", 2 },
-    .{ ">=", 3 },
-    .{ "<=", 4 },
-});
+const download = @import("../net/download.zig");
+const archive = @import("../utils/archive.zig");
+const desc = @import("../parse/desc.zig");
 
 pub const Repo = struct {
     name: []const u8,
@@ -22,33 +16,143 @@ pub const Repo = struct {
     enabled: bool = true,
 };
 
-pub const RepoConn = struct {
+const RepoDatabaseStmts = struct {
+    sync: zqlite.Stmt,
+    del_deps: zqlite.Stmt,
+    del_provs: zqlite.Stmt,
+    del_confs: zqlite.Stmt,
+    del_reps: zqlite.Stmt,
+    del_lics: zqlite.Stmt,
+    ins_deps: zqlite.Stmt,
+    ins_provs: zqlite.Stmt,
+    ins_confs: zqlite.Stmt,
+    ins_reps: zqlite.Stmt,
+    ins_lics: zqlite.Stmt,
+
+    const sql = .{
+        .sync =
+        \\INSERT INTO packages(name, arch, checksum, epoch, version, release)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        \\ON CONFLICT(name, arch) DO UPDATE SET
+        \\  checksum = excluded.checksum,
+        \\  epoch = excluded.epoch,
+        \\  version = excluded.version,
+        \\  release = excluded.release
+        \\WHERE vercmp(excluded.epoch, excluded.version, excluded.release,
+        \\             packages.epoch, packages.version, packages.release) > 0
+        \\RETURNING id;
+        ,
+        .del_deps = "DELETE FROM depends WHERE package_id = ?1",
+        .del_provs = "DELETE FROM provides WHERE package_id = ?1",
+        .del_confs = "DELETE FROM conflicts WHERE package_id = ?1",
+        .del_reps = "DELETE FROM replaces WHERE package_id = ?1",
+        .del_lics = "DELETE FROM licenses WHERE package_id = ?1",
+        .ins_deps = "INSERT INTO depends(package_id, name, kind, ver_constraint) VALUES (?1, ?2, ?3, ?4)",
+        .ins_provs = "INSERT INTO provides(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)",
+        .ins_confs = "INSERT INTO conflicts(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)",
+        .ins_reps = "INSERT INTO replaces(package_id, name, ver_constraint) VALUES (?1, ?2, ?3)",
+        .ins_lics = "INSERT INTO licenses(package_id, name) VALUES (?1, ?2)",
+    };
+
+    pub fn init(context: Context, conn: zqlite.Conn) !RepoDatabaseStmts {
+        var self: RepoDatabaseStmts = undefined;
+        inline for (std.meta.fields(RepoDatabaseStmts)) |field| {
+            @field(self, field.name) = try prepare(context, conn, @field(sql, field.name));
+        }
+        return self;
+    }
+
+    pub fn deinit(self: *RepoDatabaseStmts) void {
+        inline for (std.meta.fields(RepoDatabaseStmts)) |field| {
+            @field(self, field.name).deinit();
+        }
+    }
+};
+
+fn prepare(context: Context, conn: zqlite.Conn, sql: []const u8) !zqlite.Stmt {
+    return conn.prepare(sql) catch |err| {
+        try context.log(.Error, "Failed to prepare SQL statement: {s}\n", .{conn.lastError()});
+        return err;
+    };
+}
+
+fn bindAndExec(stmt: zqlite.Stmt, values: anytype) !void {
+    try stmt.bind(values);
+    try stmt.stepToCompletion();
+    try stmt.reset();
+}
+
+fn persistRelations(
+    id: i64,
+    pkg_info: package.PackageInfo,
+    stmts: RepoDatabaseStmts,
+) !void {
+    try bindAndExec(stmts.del_deps, .{id});
+    try bindAndExec(stmts.del_provs, .{id});
+    try bindAndExec(stmts.del_confs, .{id});
+    try bindAndExec(stmts.del_reps, .{id});
+    try bindAndExec(stmts.del_lics, .{id});
+
+    for (pkg_info.deps) |dep|
+        try bindAndExec(stmts.ins_deps, .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
+    for (pkg_info.provides) |provide|
+        try bindAndExec(stmts.ins_provs, .{ id, provide.name, provide.constraint });
+    for (pkg_info.conflicts) |confs|
+        try bindAndExec(stmts.ins_confs, .{ id, confs.name, confs.constraint });
+    for (pkg_info.replaces) |reps|
+        try bindAndExec(stmts.ins_reps, .{ id, reps.name, reps.constraint });
+    for (pkg_info.licenses) |license|
+        try bindAndExec(stmts.ins_lics, .{ id, license });
+}
+
+fn resolvePkgFilename(ctx: Context, pkg: package.PackageInfo) ![]const u8 {
+    const ver = try if (pkg.epoch != 0)
+        std.fmt.allocPrint(ctx.alloc, "{d}:{s}", .{ pkg.epoch, pkg.version })
+    else
+        std.fmt.allocPrint(ctx.alloc, "{s}", .{pkg.version});
+    defer ctx.alloc.free(ver);
+
+    const full_ver = try if (pkg.release) |rel|
+        std.fmt.allocPrint(ctx.alloc, "{s}-{s}", .{ ver, rel })
+    else
+        std.fmt.allocPrint(ctx.alloc, "{s}", .{ver});
+    defer ctx.alloc.free(full_ver);
+
+    return std.fmt.allocPrint(ctx.alloc, "{s}-{s}-{s}.pkg.tar.zst", .{
+        pkg.name,
+        full_ver,
+        pkg.arch,
+    });
+}
+
+pub const RepoDatabase = struct {
     conn: zqlite.Conn,
     repo: *Repo,
+    stmts: RepoDatabaseStmts,
 
-    pub fn open(ctx: *Context, repo: Repo) !void {
+    pub fn init(context: *Context, repo: Repo) !RepoDatabase {
         if (repo.mirrors.len <= 0) {
-            try ctx.log(.Error, "Remote repos '{s}' has no mirrors listed\n", .{repo.name});
+            try context.log(.Error, "Remote repos '{s}' has no mirrors listed\n", .{repo.name});
             return error.NoMirrors;
         }
 
-        const name = try std.fmt.allocPrint(ctx.alloc, "{s}-{s}.db", .{ repo.name, repo.arch });
-        defer ctx.alloc.free(name);
-        const path = try std.Io.Dir.path.joinZ(ctx.alloc, &.{
-            ctx.path_options.root,
-            ctx.path_options.state,
+        const name = try std.fmt.allocPrint(context.alloc, "{s}-{s}.db", .{ repo.name, repo.arch });
+        defer context.alloc.free(name);
+        const path = try std.Io.Dir.path.joinZ(context.alloc, &.{
+            context.path_options.root,
+            context.path_options.state,
             name,
         });
-        defer ctx.alloc.free(path);
+        defer context.alloc.free(path);
 
         if (std.Io.Dir.path.dirname(path)) |dir| {
-            try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+            try std.Io.Dir.cwd().createDirPath(context.io, dir);
         }
 
         const flags = zqlite.OpenFlags.Create | zqlite.OpenFlags.EXResCode;
         const conn = zqlite.open(path, flags) catch |err| switch (err) {
             error.Busy => {
-                try ctx.log(
+                try context.log(
                     .Error,
                     "Failed to open the '{s} {s}' repo db, another operation is probably in progress\n",
                     .{ repo.name, repo.arch },
@@ -138,432 +242,198 @@ pub const RepoConn = struct {
             null,
         );
         if (res != zqlite.c.SQLITE_OK) {
-            try ctx.log(.Error, "Failed to register custom SQL function `vercmp`: {s}\n", .{conn.lastError()});
+            try context.log(.Error, "Failed to register custom SQL function `vercmp`: {s}\n", .{conn.lastError()});
             return error.FailedToRegisterFunction;
         }
 
-        const repo_ptr = try ctx.alloc.create(Repo);
+        const repo_ptr = try context.alloc.create(Repo);
         repo_ptr.* = repo;
 
-        const conn_ptr = try ctx.alloc.create(RepoConn);
-        conn_ptr.* = .{ .conn = conn, .repo = repo_ptr };
-
-        try ctx.repos.append(ctx.alloc, conn_ptr);
+        return .{
+            .conn = conn,
+            .repo = repo_ptr,
+            .stmts = try .init(context, conn),
+        };
     }
 
-    pub fn deinit(self: *RepoConn, alloc: Allocator) void {
+    pub fn deinit(self: *RepoDatabase, alloc: Allocator) void {
+        self.stmts.deinit();
         self.conn.close();
         alloc.destroy(self.repo);
     }
+
+    fn syncPackageInfo(
+        self: *RepoDatabase,
+        reader: *archive.Reader,
+        entry: *archive.c.archive_entry,
+        memory: struct {
+            alloc: Allocator,
+            parser_arena: *std.heap.ArenaAllocator,
+            read_buffer: []u8,
+            contents: *std.ArrayList(u8),
+        },
+    ) !void {
+        const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
+        if (!std.mem.eql(u8, std.Io.Dir.path.basename(path), "desc")) return;
+
+        while (true) {
+            const read = try reader.readData(memory.read_buffer);
+            if (read <= 0) break;
+            try memory.contents.appendSlice(memory.alloc, memory.read_buffer[0..read]);
+        }
+
+        const pkg_info = try desc.parse(
+            memory.parser_arena.allocator(),
+            self.repo.name,
+            memory.contents.items,
+        );
+
+        if (!std.mem.eql(u8, pkg_info.arch, self.repo.arch) and
+            !std.mem.eql(u8, pkg_info.arch, "any")) return;
+
+        try self.stmts.sync.bind(.{
+            pkg_info.name,
+            pkg_info.arch,
+            if (pkg_info.checksum) |sum| blk: {
+                var chk: [32]u8 = undefined;
+                @memcpy(&chk, sum);
+                break :blk &chk;
+            } else null,
+            pkg_info.epoch,
+            pkg_info.version,
+            pkg_info.release,
+        });
+        const row = try self.stmts.sync.step();
+
+        if (row) {
+            const id = self.stmts.sync.int(0);
+            try persistRelations(id, pkg_info, self.stmts);
+        }
+
+        try self.stmts.sync.reset();
+    }
+
+    pub fn sync(self: *RepoDatabase, context: Context) !void {
+        const alloc = context.alloc;
+        const io = context.io;
+        const repo = self.repo;
+
+        var client = try download.CurlClient.init(context);
+        defer client.deinit(context);
+
+        const db_name = try std.fmt.allocPrint(
+            alloc,
+            "{s}-{s}.db",
+            .{ repo.name, repo.arch },
+        );
+        defer alloc.free(db_name);
+        const dest = try std.Io.Dir.path.join(alloc, &.{
+            context.path_options.root,
+            context.path_options.cache,
+            "db",
+            db_name,
+        });
+        defer alloc.free(dest);
+
+        if (std.Io.Dir.path.dirname(dest)) |dir| try std.Io.Dir.cwd().createDirPath(io, dir);
+
+        var db_name_buf: [128]u8 = undefined;
+        const db_filename = try std.fmt.bufPrint(
+            &db_name_buf,
+            "{s}.db",
+            .{repo.name},
+        );
+
+        client.downloadFromMirrors(context, repo.*, db_filename, dest) catch |err| switch (err) {
+            error.FileNotFound => {
+                try context.log(
+                    .Error,
+                    "Failed to download repo file for '{s}'\n",
+                    .{repo.name},
+                );
+                return err;
+            },
+            else => return err,
+        };
+
+        var archive_reader = try archive.Reader.init();
+        defer archive_reader.deinit();
+
+        const db_file = try std.Io.Dir.cwd().openFile(io, dest, .{});
+        defer db_file.close(io);
+
+        var db_hasher: std.crypto.hash.Blake3 = .init(.{});
+        var reader_buf: [4096]u8 = undefined;
+        var db_file_reader = db_file.reader(io, &reader_buf);
+        const db_reader = &db_file_reader.interface;
+
+        var db_buf: [4096]u8 = undefined;
+        while (true) {
+            const bytes = try db_reader.readSliceShort(&db_buf);
+            if (bytes <= 0) break;
+            db_hasher.update(db_buf[0..bytes]);
+        }
+
+        var db_hash: [32]u8 = undefined;
+        db_hasher.final(&db_hash);
+
+        const existing_hash_row = try self.conn.row("SELECT hash FROM metadata", .{});
+        if (existing_hash_row) |row| {
+            defer row.deinit();
+            if (row.nullableBlob(0)) |blob| {
+                if (blob.len != 32) return error.InvalidHash;
+                if (std.mem.eql(u8, blob, &db_hash)) {
+                    try context.log(.Info, "{s} is up to date\n", .{repo.name});
+                    return;
+                }
+            }
+        }
+
+        try db_reader.seekTo(0);
+        try archive_reader.openFd(db_file.handle);
+
+        try self.conn.transaction();
+        errdefer self.conn.rollback();
+
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+
+        var contents: std.ArrayList(u8) = .empty;
+        defer contents.deinit(alloc);
+
+        var buf: [8192]u8 = undefined;
+        while (try archive_reader.nextEntry()) |entry| {
+            contents.clearRetainingCapacity();
+            defer _ = arena.reset(.retain_capacity);
+            try self.syncPackageInfo(alloc, &arena, &buf, &contents, &archive_reader, entry);
+        }
+
+        try self.conn.exec("UPDATE metadata SET last_refresh = unixepoch(), hash = ?1", .{&db_hash});
+        try self.conn.commit();
+    }
 };
 
-pub fn openAll(ctx: *Context, repos: []Repo) !void {
-    for (repos) |repo| try RepoConn.open(ctx, repo);
-    std.mem.sort(*RepoConn, ctx.repos.items, {}, lessThanPriority);
-}
-
-fn lessThanPriority(_: void, a: *RepoConn, b: *RepoConn) bool {
+fn lessThanPriority(_: void, a: RepoDatabase, b: RepoDatabase) bool {
     return a.repo.priority < b.repo.priority;
 }
 
-pub fn getProvider(
-    ctx: Context,
-    name: []const u8,
-    explicit: bool,
-    selected: ?*std.StringHashMap(i64),
-    provider_constraint: ?[]const u8,
-) !package.Provider {
-    var providers: std.ArrayList(struct {
-        conn: *RepoConn,
-        name: []const u8,
-        id: i64,
-        version: ?[]const u8 = null,
-    }) = .empty;
-    defer {
-        for (providers.items) |item| {
-            ctx.alloc.free(item.name);
-            if (item.version) |ver| ctx.alloc.free(ver);
-        }
-        providers.deinit(ctx.alloc);
-    }
+pub const RepoDatabaseRegistry = struct {
+    databases: []RepoDatabase,
 
-    for (ctx.repos.items) |repo| {
-        var rows = try repo.conn.rows(
-            \\SELECT id, name, NULL AS ver_constraint FROM packages WHERE name = ?1
-            \\UNION
-            \\SELECT pk.id, pk.name, p.ver_constraint FROM provides p
-            \\  JOIN packages pk ON p.package_id = pk.id
-            \\WHERE p.name = ?1
-        , .{name});
-        defer rows.deinit();
+    pub fn init(context: *Context, repos: []Repo) !RepoDatabaseRegistry {
+        const alloc = context.alloc;
 
-        while (rows.next()) |r| {
-            try providers.append(ctx.alloc, .{
-                .conn = repo,
-                .name = try ctx.alloc.dupe(u8, r.cString(1)),
-                .id = r.int(0),
-                .version = if (r.nullableCString(2)) |v| try ctx.alloc.dupe(u8, v) else null,
-            });
-        }
-    }
+        var sorted: std.ArrayList(RepoDatabase) = .empty;
+        errdefer sorted.deinit(alloc);
+        for (repos) |repo| try sorted.append(alloc, try .init(context, repo));
+        std.mem.sort(RepoDatabase, sorted.items, {}, lessThanPriority);
 
-    if (providers.items.len == 0) {
-        try ctx.log(.Error, "No providers found for '{s}'\n", .{name});
-        return error.ProviderNotFound;
-    }
-
-    const selected_id = if (selected) |cache| blk: {
-        if (cache.get(name)) |id| {
-            for (providers.items) |p| {
-                if (p.id == id)
-                    break :blk id;
-            }
-        }
-
-        break :blk null;
-    } else null;
-
-    const provider = if (selected_id) |id| blk: {
-        for (providers.items) |provider| {
-            if (provider.id == id)
-                break :blk provider;
-        }
-
-        return error.ProviderNotFound;
-    } else blk: {
-        const index = if (providers.items.len == 1) 0 else select: {
-            try ctx.log(
-                .Info,
-                "There are {d} providers for '{s}', select which one you would like to use:\n",
-                .{ providers.items.len, name },
-            );
-
-            for (providers.items, 1..) |pkg, idx| {
-                try ctx.log(.None, "{d:>3}: {s}\n", .{ idx, pkg.name });
-            }
-
-            break :select try ctx.select(providers.items.len);
+        return .{
+            .databases = try sorted.toOwnedSlice(alloc),
         };
-
-        const provider = providers.items[index];
-
-        if (selected) |cache| {
-            try putSelected(ctx, cache, name, provider.id);
-            try putSelected(ctx, cache, provider.name, provider.id);
-
-            var rows = try provider.conn.conn.rows(
-                "SELECT name FROM provides WHERE package_id = ?1",
-                .{provider.id},
-            );
-            defer rows.deinit();
-            while (rows.next()) |row| {
-                try putSelected(ctx, cache, row.cString(0), provider.id);
-            }
-        }
-
-        break :blk provider;
-    };
-
-    var row = (try provider.conn.conn.row("SELECT * FROM packages WHERE id = ?1", .{provider.id})).?;
-    defer row.deinit();
-    const conn = provider.conn.conn;
-
-    const id = row.int(0);
-    const pkg = try ctx.alloc.create(package.PackageInfo);
-
-    const blob = row.blob(3);
-    if (blob.len != 32) return error.InvalidHash;
-    var hash: [32]u8 = undefined;
-    @memcpy(&hash, blob);
-
-    pkg.* = .{
-        .name = try ctx.alloc.dupe(u8, row.cString(1)),
-        .arch = try ctx.alloc.dupe(u8, row.cString(2)),
-        .checksum = hash,
-        .repo = try ctx.alloc.dupe(u8, provider.conn.repo.name),
-        .epoch = @intCast(row.int(4)),
-        .version = try ctx.alloc.dupe(u8, row.cString(5)),
-        .release = if (row.nullableCString(6)) |sum| try ctx.alloc.dupe(u8, sum) else null,
-        .explicit = explicit,
-    };
-
-    if (provider_constraint) |c| {
-        const local = if (provider.version) |pv|
-            stripOperator(pv)
-        else
-            try formatEVR(ctx.alloc, pkg.epoch, pkg.version, pkg.release);
-        defer if (provider.version == null) ctx.alloc.free(local);
-
-        if (!try satisfiesConstraint(local, c)) {
-            pkg.deinit(ctx.alloc);
-            ctx.alloc.destroy(pkg);
-            return error.ConflictingDependencies;
-        }
     }
 
-    var depends: std.ArrayList(package.Dependency) = .empty;
-    errdefer {
-        for (depends.items) |*dep| dep.deinit(ctx.alloc);
-        depends.deinit(ctx.alloc);
+    pub fn deinit(self: *RepoDatabaseRegistry, alloc: Allocator) void {
+        for (self.databases) |*db| db.deinit(alloc);
     }
-    var depend_rows = try conn.rows("SELECT * FROM depends WHERE package_id = ?1", .{id});
-    defer depend_rows.deinit();
-    while (depend_rows.next()) |dep| {
-        try depends.append(ctx.alloc, .{
-            .name = try ctx.alloc.dupe(u8, dep.cString(1)),
-            .constraint = if (dep.nullableCString(2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint)
-            else
-                null,
-            .kind = switch (dep.int(3)) {
-                0 => .Run,
-                1 => .Make,
-                2 => .Check,
-                3 => .Optional,
-                else => {
-                    try ctx.log(.Error, "Invalid dependency kind\n", .{});
-                    return error.InvalidDependency;
-                },
-            },
-        });
-    }
-    pkg.deps = try depends.toOwnedSlice(ctx.alloc);
-
-    var provides: std.ArrayList(package.Constrained) = .empty;
-    errdefer {
-        for (provides.items) |*constraint| constraint.deinit(ctx.alloc);
-        provides.deinit(ctx.alloc);
-    }
-    var provide_rows = try conn.rows("SELECT * FROM provides WHERE package_id = ?1", .{id});
-    defer provide_rows.deinit();
-    while (provide_rows.next()) |r| {
-        try provides.append(ctx.alloc, .{
-            .name = try ctx.alloc.dupe(u8, r.cString(1)),
-            .constraint = if (r.nullableCString(2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint)
-            else
-                null,
-        });
-    }
-    pkg.provides = try provides.toOwnedSlice(ctx.alloc);
-
-    var conflicts: std.ArrayList(package.Constrained) = .empty;
-    errdefer {
-        for (conflicts.items) |*constraint| constraint.deinit(ctx.alloc);
-        conflicts.deinit(ctx.alloc);
-    }
-    var conflict_rows = try conn.rows("SELECT * FROM conflicts WHERE package_id = ?1", .{id});
-    defer conflict_rows.deinit();
-    while (conflict_rows.next()) |r| {
-        try conflicts.append(ctx.alloc, .{
-            .name = try ctx.alloc.dupe(u8, r.cString(1)),
-            .constraint = if (r.nullableCString(2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint)
-            else
-                null,
-        });
-    }
-    pkg.conflicts = try conflicts.toOwnedSlice(ctx.alloc);
-
-    var replaces: std.ArrayList(package.Constrained) = .empty;
-    errdefer {
-        for (replaces.items) |*constraint| constraint.deinit(ctx.alloc);
-        replaces.deinit(ctx.alloc);
-    }
-    var replace_rows = try conn.rows("SELECT * FROM replaces WHERE package_id = ?1", .{id});
-    defer replace_rows.deinit();
-    while (replace_rows.next()) |r| {
-        try replaces.append(ctx.alloc, .{
-            .name = try ctx.alloc.dupe(u8, r.cString(1)),
-            .constraint = if (r.nullableCString(2)) |constraint|
-                try ctx.alloc.dupe(u8, constraint)
-            else
-                null,
-        });
-    }
-    pkg.replaces = try replaces.toOwnedSlice(ctx.alloc);
-
-    var licenses: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (licenses.items) |license| ctx.alloc.free(license);
-        licenses.deinit(ctx.alloc);
-    }
-    var license_rows = try conn.rows("SELECT * FROM licenses WHERE package_id = ?1", .{id});
-    defer license_rows.deinit();
-    while (license_rows.next()) |r| {
-        try licenses.append(
-            ctx.alloc,
-            try ctx.alloc.dupe(u8, r.cString(1)),
-        );
-    }
-    pkg.licenses = try licenses.toOwnedSlice(ctx.alloc);
-
-    return .{ .info = pkg, .conn = provider.conn, .id = id };
-}
-
-pub fn getProviderWithDepsAll(ctx: Context, names: [][]const u8, constraints: ?[]?[]const u8) ![]package.Provider {
-    var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
-    defer {
-        var it = seen.valueIterator();
-        while (it.next()) |n| ctx.alloc.free(n.*);
-        seen.deinit();
-    }
-
-    var selected: std.StringHashMap(i64) = .init(ctx.alloc);
-    defer {
-        var it = selected.keyIterator();
-        while (it.next()) |key| {
-            ctx.alloc.free(key.*);
-        }
-
-        selected.deinit();
-    }
-
-    var providers: std.ArrayList(package.Provider) = .empty;
-    errdefer {
-        for (providers.items) |provider| provider.deinit(ctx.alloc);
-        providers.deinit(ctx.alloc);
-    }
-
-    for (names, 0..) |name, idx| {
-        const exists = if (try ctx.getStore().row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
-            defer row.deinit();
-            break :blk true;
-        } else false;
-        if (exists) continue;
-
-        const constraint = if (constraints) |c| c[idx] else null;
-        try ctx.log(.Info, "Resolving dependencies for '{s}'...\n", .{name});
-        const resolved = try getProviderWithDepsRecursive(ctx, name, true, &seen, &selected, constraint);
-        defer ctx.alloc.free(resolved);
-        try providers.appendSlice(ctx.alloc, resolved);
-    }
-
-    return try providers.toOwnedSlice(ctx.alloc);
-}
-
-pub fn getProviderWithDeps(ctx: Context, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
-    const exists = if (try ctx.getStore().row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
-        defer row.deinit();
-        break :blk true;
-    } else false;
-    if (exists) return &.{};
-
-    var seen: std.AutoHashMap(i64, []const u8) = .init(ctx.alloc);
-    defer {
-        var it = seen.valueIterator();
-        while (it.next()) |n| ctx.alloc.free(n.*);
-        seen.deinit();
-    }
-
-    var selected: std.StringHashMap(i64) = .init(ctx.alloc);
-    defer {
-        var it = selected.keyIterator();
-        while (it.next()) |key| {
-            ctx.alloc.free(key.*);
-        }
-
-        selected.deinit();
-    }
-
-    try ctx.log(.Info, "Resolving dependencies for '{s}'...\n", .{name});
-    return try getProviderWithDepsRecursive(ctx, name, true, &seen, &selected, constraint);
-}
-
-fn getProviderWithDepsRecursive(
-    ctx: Context,
-    name: []const u8,
-    first: bool,
-    seen: *std.AutoHashMap(i64, []const u8),
-    selected: *std.StringHashMap(i64),
-    constraint: ?[]const u8,
-) ![]package.Provider {
-    const current = try getProvider(ctx, name, first, selected, constraint);
-
-    if (seen.get(current.id)) |_| {
-        current.deinit(ctx.alloc);
-        return &.{};
-    }
-
-    const current_version = try formatEVR(ctx.alloc, current.info.epoch, current.info.version, current.info.release);
-    try seen.put(current.id, current_version);
-
-    var providers: std.ArrayList(package.Provider) = .empty;
-    errdefer {
-        for (providers.items) |provider| provider.deinit(ctx.alloc);
-        providers.deinit(ctx.alloc);
-    }
-
-    try providers.append(ctx.alloc, current);
-    for (current.info.deps) |dep| {
-        if (dep.kind != .Run) continue;
-        const children = try getProviderWithDepsRecursive(
-            ctx,
-            dep.name,
-            false,
-            seen,
-            selected,
-            dep.constraint,
-        );
-        defer ctx.alloc.free(children);
-        try providers.appendSlice(ctx.alloc, children);
-    }
-
-    return try providers.toOwnedSlice(ctx.alloc);
-}
-
-fn stripOperator(s: []const u8) []const u8 {
-    if (s.len >= 2 and comps.get(s[0..2]) != null) return s[2..];
-    if (s.len >= 1 and comps.get(s[0..1]) != null) return s[1..];
-    return s;
-}
-
-fn formatEVR(alloc: std.mem.Allocator, epoch: u32, ver: []const u8, release: ?[]const u8) ![]u8 {
-    return if (release) |r|
-        std.fmt.allocPrint(alloc, "{d}:{s}-{s}", .{ epoch, ver, r })
-    else
-        std.fmt.allocPrint(alloc, "{d}:{s}", .{ epoch, ver });
-}
-
-fn putSelected(
-    ctx: Context,
-    selected: *std.StringHashMap(i64),
-    name: []const u8,
-    id: i64,
-) !void {
-    if (selected.contains(name))
-        return;
-
-    const key = try ctx.alloc.dupe(u8, name);
-    errdefer ctx.alloc.free(key);
-
-    try selected.put(key, id);
-}
-
-fn satisfiesConstraint(local: []const u8, constraint: []const u8) !bool {
-    var comp: u8 = undefined;
-    var op_len: u8 = undefined;
-
-    if (constraint.len >= 2) {
-        if (comps.get(constraint[0..2])) |c| {
-            comp = c;
-            op_len = 2;
-        } else if (comps.get(constraint[0..1])) |c| {
-            comp = c;
-            op_len = 1;
-        } else return true;
-    } else {
-        comp = comps.get(constraint[0..1]) orelse return error.InvalidDependencyConstraint;
-        op_len = 1;
-    }
-
-    const res = version.cmp(local, constraint[op_len..]);
-    return switch (comp) {
-        0 => res == 1,
-        1 => res == -1,
-        2 => res == 0,
-        3 => res >= 0,
-        4 => res <= 0,
-        else => unreachable,
-    };
-}
+};
