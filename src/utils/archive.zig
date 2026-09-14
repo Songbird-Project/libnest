@@ -19,7 +19,7 @@ pub fn ingestFile(ctx: Ctx, reader: *Reader, path: []const u8, mode: u32) !inges
     var src: std.Random.IoSource = .{ .io = ctx.io };
     const rand = src.interface();
 
-    const tmp_name = try std.fmt.allocPrint(ctx.alloc, ".tmp-{d}", .{rand.int(u8)});
+    const tmp_name = try std.fmt.allocPrint(ctx.alloc, ".tmp-{d}", .{rand.int(u64)});
     defer ctx.alloc.free(tmp_name);
     const tmp_path = try Io.Dir.path.join(ctx.alloc, &.{
         ctx.path_options.root,
@@ -121,10 +121,6 @@ pub const Reader = struct {
         );
 
         if (bytes < 0) {
-            std.debug.print("archive_read_data returned: {d}, error: {s}\n", .{
-                bytes,
-                std.mem.span(c.archive_error_string(self.archive)),
-            });
             if (bytes == c.ARCHIVE_EOF) return 0;
             return error.ReadFailed;
         }

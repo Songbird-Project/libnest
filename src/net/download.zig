@@ -1,20 +1,21 @@
 const std = @import("std");
+const Io = std.Io;
 const curl = @import("curl");
 
-const RepoConn = @import("../core/repo.zig").RepoConn;
-const context = @import("../core/context.zig");
-const Context = context.Context;
+const Repo = @import("../core/repo.zig").Repo;
+const Context = @import("../core/context.zig").Context;
+const resolve = @import("../core/resolve.zig");
 
 pub const CurlClient = struct {
     easy: *curl.Easy,
     ca_bundle: std.array_list.Aligned(u8, null),
 
-    pub fn init(ctx: Context) !CurlClient {
-        var ca_bundle = try curl.allocCABundle(ctx.alloc, ctx.io);
-        errdefer ca_bundle.deinit(ctx.alloc);
+    pub fn init(context: Context) !CurlClient {
+        var ca_bundle = try curl.allocCABundle(context.alloc, context.io);
+        errdefer ca_bundle.deinit(context.alloc);
 
-        const easy = try ctx.alloc.create(curl.Easy);
-        errdefer ctx.alloc.destroy(easy);
+        const easy = try context.alloc.create(curl.Easy);
+        errdefer context.alloc.destroy(easy);
 
         easy.* = try curl.Easy.init(.{ .ca_bundle = ca_bundle });
         errdefer easy.deinit();
@@ -25,27 +26,34 @@ pub const CurlClient = struct {
         };
     }
 
-    pub fn deinit(self: *CurlClient, ctx: Context) void {
+    pub fn deinit(self: *CurlClient, context: Context) void {
         self.easy.deinit();
-        ctx.alloc.destroy(self.easy);
-        self.ca_bundle.deinit(ctx.alloc);
+        context.alloc.destroy(self.easy);
+        self.ca_bundle.deinit(context.alloc);
     }
 
     pub fn download(
         self: CurlClient,
-        ctx: Context,
+        context: Context,
         url: []const u8,
         dest: []const u8,
     ) !void {
         defer self.easy.reset();
 
-        const c_url = try ctx.alloc.dupeSentinel(u8, url, 0);
-        defer ctx.alloc.free(c_url);
+        const c_url = try context.alloc.dupeSentinel(u8, url, 0);
+        defer context.alloc.free(c_url);
 
-        const out = try std.Io.Dir.cwd().createFile(ctx.io, dest, .{});
-        defer out.close(ctx.io);
+        const tmp = try Io.Dir.path.join(context.alloc, &.{
+            Io.Dir.path.dirname(dest) orelse "",
+            ".tmp",
+            Io.Dir.path.basename(dest),
+        });
+        try Io.Dir.cwd().createDirPath(context.io, Io.Dir.path.dirname(tmp).?);
+
+        const out = try std.Io.Dir.cwd().createFile(context.io, tmp, .{});
+        defer out.close(context.io);
         var out_buf: [8192]u8 = undefined;
-        var writer = out.writer(ctx.io, &out_buf);
+        var writer = out.writer(context.io, &out_buf);
         const file_writer = &writer.interface;
 
         try self.easy.setMethod(.GET);
@@ -56,57 +64,52 @@ pub const CurlClient = struct {
         try file_writer.flush();
         if (res.status_code != 200) {
             if (self.easy.diagnostics.getMessage()) |msg| {
-                ctx.log(.Error, "GET request failed: {s}", .{msg}) catch {};
+                context.log(.Error, "GET request failed: {s}", .{msg}) catch {};
             }
             return error.DownloadFailed;
         }
+
+        try Io.Dir.cwd().rename(tmp, .cwd(), dest, context.io);
     }
 
     pub fn downloadFromMirror(
         self: CurlClient,
-        ctx: Context,
-        repo_conn: RepoConn,
+        context: Context,
+        repo: Repo,
+        fmt: []const u8,
+        filename: []const u8,
+        dest: []const u8,
+    ) !bool {
+        const resolved = resolve.mirrorUrl(context.alloc, fmt, filename, .{
+            .formatters = &.{
+                .{ .key = "arch", .value = repo.arch },
+                .{ .key = "repo", .value = repo.name },
+            },
+        });
+
+        self.download(context, resolved, dest) catch |err| switch (err) {
+            error.DownloadFailed => return false,
+            else => return err,
+        };
+
+        return true;
+    }
+
+    pub fn downloadFromMirrors(
+        self: CurlClient,
+        context: Context,
+        repo: Repo,
         filename: []const u8,
         dest: []const u8,
     ) !void {
-        const repo = repo_conn.repo;
-        for (repo.mirrors) |mirror| {
-            const repo_url = try std.mem.replaceOwned(
-                u8,
-                ctx.alloc,
-                mirror,
-                "$repo",
-                repo.name,
-            );
-            defer ctx.alloc.free(repo_url);
-
-            const resolved_url = try std.mem.replaceOwned(
-                u8,
-                ctx.alloc,
-                repo_url,
-                "$arch",
-                repo.arch,
-            );
-            defer ctx.alloc.free(resolved_url);
-
-            const url = try std.fmt.allocPrint(
-                ctx.alloc,
-                "{s}/{s}",
-                .{ resolved_url, filename },
-            );
-            defer ctx.alloc.free(url);
-
-            self.download(ctx, url, dest) catch {
-                try ctx.log(
-                    .Error,
-                    "Failed to download file for '{s}' from mirror '{s}'\n",
-                    .{ filename, url },
-                );
-                continue;
+        var success = false;
+        for (repo.mirrors) |fmt| {
+            success = self.downloadFromMirror(context, repo, fmt, filename, dest) catch |err| switch (err) {
+                error.DownloadFailed => {},
+                else => return err,
             };
-            return;
+            if (success) break;
         }
-
-        return error.AllMirrorsFailed;
+        if (!success) return error.AllMirrorsFailed;
     }
 };
