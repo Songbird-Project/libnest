@@ -15,6 +15,7 @@ pub const LogOptions = struct {
     fatal_prefix: []const u8 = "\x1B[0;34m[\x1B[0;35mF\x1B[0;34m]\x1B[0m ",
 
     minimum_log_level: LogLevel = .Info,
+    enabled: bool = true,
 };
 
 pub const PathOptions = struct {
@@ -30,7 +31,6 @@ pub const Context = struct {
     alloc: std.mem.Allocator,
 
     store: ?store.StoreConn = null,
-    repos: std.ArrayList(*RepoConn) = .empty,
 
     log_options: LogOptions = .{},
     path_options: PathOptions = .{},
@@ -47,20 +47,11 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         if (self.store) |conn| conn.close();
-        self.closeRepoConns();
         self.repos.deinit(self.alloc);
     }
 
-    pub fn closeRepoConns(self: *Context) void {
-        for (self.repos.items) |repo| {
-            repo.deinit(self.alloc);
-            self.alloc.destroy(repo);
-        }
-        self.repos.clearRetainingCapacity();
-    }
-
-    pub fn getStore(self: Context) store.StoreConn {
-        return self.store.?;
+    pub fn getStore(self: Context) !store.StoreConn {
+        return self.store orelse error.NoStoreAvailable;
     }
 
     pub fn log(
@@ -69,6 +60,7 @@ pub const Context = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) !void {
+        if (!self.log_options.enabled) return;
         if (@intFromEnum(level) < @intFromEnum(self.log_options.minimum_log_level)) return;
 
         const prefix = switch (level) {
