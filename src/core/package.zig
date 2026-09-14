@@ -1,11 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mem = @import("../utils/mem.zig");
-const RepoConn = @import("repo.zig").RepoConn;
+const RepoDatabase = @import("repo.zig").RepoDatabase;
 
 pub const Provider = struct {
     info: *PackageInfo,
-    conn: *RepoConn,
+    db: *RepoDatabase,
     id: i64,
 
     pub fn deinit(self: Provider, alloc: Allocator) void {
@@ -55,36 +55,28 @@ pub const DepKind = enum(u8) {
     Optional,
 };
 
+fn splitNameConstraint(src: []const u8) !Constrained {
+    if (std.mem.findAny(u8, src, "=<>")) |idx|
+        return .{ .name = src[0..idx], .constraint = src[idx..] }
+    else
+        return .{ .name = src, .constraint = null };
+}
+
 pub const Constrained = struct {
     name: []const u8,
     constraint: ?[]const u8 = null,
 
     pub fn parseAlloc(alloc: Allocator, src: []const u8) !Constrained {
-        var parsed: Constrained = undefined;
+        const constrained = splitNameConstraint(src);
 
-        if (std.mem.findAny(u8, src, "=<>")) |idx| {
-            parsed.name = try alloc.dupe(u8, src[0..idx]);
-            parsed.constraint = try alloc.dupe(u8, src[idx..]);
-        } else {
-            parsed.name = try alloc.dupe(u8, src);
-            parsed.constraint = null;
-        }
-
-        return parsed;
+        return .{
+            .name = try alloc.dupe(u8, constrained.name),
+            .constraint = try alloc.dupe(u8, constrained.constraint),
+        };
     }
 
     pub fn parse(src: []const u8) Constrained {
-        var parsed: Constrained = undefined;
-
-        if (std.mem.findAny(u8, src, "=<>")) |idx| {
-            parsed.name = src[0..idx];
-            parsed.constraint = src[idx..];
-        } else {
-            parsed.name = src;
-            parsed.constraint = null;
-        }
-
-        return parsed;
+        return splitNameConstraint(src);
     }
 
     pub fn deinit(self: *Constrained, alloc: Allocator) void {
@@ -99,33 +91,23 @@ pub const Dependency = struct {
     constraint: ?[]const u8,
 
     pub fn parseAlloc(alloc: Allocator, dep: []const u8, kind: DepKind) !Dependency {
-        var parsed: Dependency = undefined;
-        parsed.kind = kind;
+        const constrained = splitNameConstraint(dep);
 
-        if (std.mem.findAny(u8, dep, "=<>")) |idx| {
-            parsed.name = try alloc.dupe(u8, dep[0..idx]);
-            parsed.constraint = try alloc.dupe(u8, dep[idx..]);
-        } else {
-            parsed.name = try alloc.dupe(u8, dep);
-            parsed.constraint = null;
-        }
-
-        return parsed;
+        return .{
+            .kind = kind,
+            .name = try alloc.dupe(u8, constrained.name),
+            .constraint = try alloc.dupe(u8, constrained.constraint),
+        };
     }
 
     pub fn parse(dep: []const u8, kind: DepKind) Dependency {
-        var parsed: Dependency = undefined;
-        parsed.kind = kind;
+        const constrained = splitNameConstraint(dep);
 
-        if (std.mem.findAny(u8, dep, "=<>")) |idx| {
-            parsed.name = dep[0..idx];
-            parsed.constraint = dep[idx..];
-        } else {
-            parsed.name = dep;
-            parsed.constraint = null;
-        }
-
-        return parsed;
+        return .{
+            .kind = kind,
+            .name = constrained.name,
+            .constraint = constrained.constraint,
+        };
     }
 
     pub fn deinit(self: *Dependency, alloc: Allocator) void {
