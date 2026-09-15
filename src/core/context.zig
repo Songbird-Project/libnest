@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const RepoConn = @import("repo.zig").RepoConn;
 const store = @import("../store/store.zig");
 const config = @import("config");
 
@@ -47,7 +46,6 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         if (self.store) |conn| conn.close();
-        self.repos.deinit(self.alloc);
     }
 
     pub fn getStore(self: Context) !store.StoreConn {
