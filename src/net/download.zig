@@ -80,12 +80,14 @@ pub const CurlClient = struct {
         filename: []const u8,
         dest: []const u8,
     ) !bool {
-        const resolved = resolve.mirrorUrl(context.alloc, fmt, filename, .{
+        const alloc = context.alloc;
+        const resolved = try resolve.mirrorUrl(alloc, fmt, filename, .{
             .formatters = &.{
                 .{ .key = "arch", .value = repo.arch },
                 .{ .key = "repo", .value = repo.name },
             },
         });
+        defer alloc.free(resolved);
 
         self.download(context, resolved, dest) catch |err| switch (err) {
             error.DownloadFailed => return false,
