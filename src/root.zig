@@ -11,13 +11,12 @@ pub const store = @import("store/store.zig");
 pub const download = @import("net/download.zig");
 
 pub const internal = struct {
-    pub const Parse = struct {
+    pub const parse = struct {
         pub const desc = @import("parse/desc.zig");
-        // pub const pkginfo = @import("parse/pkginfo.zig");
-        // pub const pkgbuild = @import("parse/pkgbuild.zig");
     };
 
     pub const archive = @import("utils/archive.zig");
+    pub const sqlite = @import("utils/sqlite.zig");
     pub const mem = @import("utils/mem.zig");
     pub const version = @import("utils/version.zig");
 };
