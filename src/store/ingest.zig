@@ -1,8 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const context = @import("../core/context.zig");
-const Context = context.Context;
+const Context = @import("../core/context.zig").Context;
 const archive = @import("../utils/archive.zig");
 
 const METADATA_FILES: std.StaticStringMap(void) = .initComptime(.{
@@ -40,14 +39,14 @@ pub const IngestResult = struct {
 };
 
 /// `ingestPackage` requires that a valid transaction is already active
-pub fn ingestPackage(ctx: Context, reader: *archive.Reader, id: i64) !void {
-    const db = ctx.getStore();
+pub fn ingestPackage(context: Context, reader: *archive.Reader, id: i64) !void {
+    const db = try context.getStore();
 
-    var hashes: std.StringHashMap([32]u8) = .init(ctx.alloc);
+    var hashes: std.StringHashMap([32]u8) = .init(context.alloc);
     defer {
         var iter = hashes.iterator();
         while (iter.next()) |entry| {
-            ctx.alloc.free(entry.key_ptr.*);
+            context.alloc.free(entry.key_ptr.*);
         }
 
         hashes.deinit();
@@ -56,37 +55,41 @@ pub fn ingestPackage(ctx: Context, reader: *archive.Reader, id: i64) !void {
     var pending_links: std.ArrayList(struct { path: []const u8, links_to: []const u8, mode: u32 }) = .empty;
     defer {
         for (pending_links.items) |link| {
-            ctx.alloc.free(link.path);
-            ctx.alloc.free(link.links_to);
+            context.alloc.free(link.path);
+            context.alloc.free(link.links_to);
         }
-        pending_links.deinit(ctx.alloc);
+        pending_links.deinit(context.alloc);
     }
 
     while (try reader.nextEntry()) |entry| {
-        const result = try ingestEntry(ctx, reader, entry);
-        defer result.deinit(ctx.alloc);
+        const result = try ingestEntry(context, reader, entry);
+        defer result.deinit(context.alloc);
 
         if (result.kind == .skip) continue;
 
         switch (result.kind) {
             .file => {
+                // This is safe since file entries always have a hash
+                var hash: [32]u8 = undefined;
+                @memcpy(&hash, result.hash.?);
+
                 try hashes.put(
-                    try ctx.alloc.dupe(u8, result.path),
+                    try context.alloc.dupe(u8, result.path),
                     result.hash.?,
                 );
                 try db.exec(
                     \\INSERT INTO blobs(hash, size, created)
                     \\VALUES(?1, ?2, unixepoch()) ON CONFLICT DO NOTHING
-                , .{ if (result.hash) |hash| &hash else null, result.size });
+                , .{ &hash, result.size });
                 try db.exec(
                     \\INSERT INTO files(package_id, path, hash, target, mode)
                     \\VALUES (?,?,?,NULL,?)
-                , .{ id, result.path, if (result.hash) |hash| &hash else null, result.mode });
+                , .{ id, result.path, &hash, result.mode });
             },
             .link => {
-                try pending_links.append(ctx.alloc, .{
-                    .path = try ctx.alloc.dupe(u8, result.path),
-                    .links_to = try ctx.alloc.dupe(u8, result.links_to.?),
+                try pending_links.append(context.alloc, .{
+                    .path = try context.alloc.dupe(u8, result.path),
+                    .links_to = try context.alloc.dupe(u8, result.links_to.?),
                     .mode = result.mode,
                 });
             },
@@ -103,7 +106,7 @@ pub fn ingestPackage(ctx: Context, reader: *archive.Reader, id: i64) !void {
 
     for (pending_links.items) |link| {
         const hash = hashes.get(link.links_to) orelse {
-            try ctx.log(
+            try context.log(
                 .Error,
                 "Unresolved hardlink from {s} to {s}\n",
                 .{ link.path, link.links_to },
@@ -118,8 +121,8 @@ pub fn ingestPackage(ctx: Context, reader: *archive.Reader, id: i64) !void {
     }
 }
 
-fn ingestEntry(ctx: Context, reader: *archive.Reader, entry: *archive.c.archive_entry) !IngestResult {
-    const path = try ctx.alloc.dupe(u8, std.mem.span(archive.c.archive_entry_pathname(entry)));
+fn ingestEntry(context: Context, reader: *archive.Reader, entry: *archive.c.archive_entry) !IngestResult {
+    const path = try context.alloc.dupe(u8, std.mem.span(archive.c.archive_entry_pathname(entry)));
 
     if (METADATA_FILES.has(Io.Dir.path.basename(path))) return .{
         .path = path,
@@ -136,7 +139,7 @@ fn ingestEntry(ctx: Context, reader: *archive.Reader, entry: *archive.c.archive_
             .kind = .link,
             .path = path,
             .mode = mode,
-            .links_to = try ctx.alloc.dupe(u8, target),
+            .links_to = try context.alloc.dupe(u8, target),
         };
     }
 
@@ -150,19 +153,19 @@ fn ingestEntry(ctx: Context, reader: *archive.Reader, entry: *archive.c.archive_
             .kind = .symlink,
             .path = path,
             .mode = mode,
-            .target = try ctx.alloc.dupe(
+            .target = try context.alloc.dupe(
                 u8,
                 std.mem.span(archive.c.archive_entry_symlink(entry)),
             ),
         },
         archive.c.S_IFREG => return try archive.ingestFile(
-            ctx,
+            context,
             reader,
             path,
             mode,
         ),
         else => {
-            try ctx.log(
+            try context.log(
                 .Error,
                 "Unsupported archive entry with path={s}, kind=0o{o}, mode=0o{o}\n",
                 .{ path, kind, mode },

@@ -9,7 +9,7 @@ const version = @import("../utils/version.zig");
 const zqlite = @import("zqlite");
 
 pub const MirrorFormatterOpts = struct {
-    sentinel: ?u8,
+    sentinel: ?u8 = null,
     formatters: []struct { key: []const u8, value: anyopaque },
 };
 
@@ -349,7 +349,7 @@ const PackageResolver = struct {
         pkg.replaces = try getConstrainedRelation(self.context, conn, "replaces", id);
         pkg.licenses = try getNames(self.context, conn, "licenses", id);
 
-        return .{ .info = pkg, .conn = provider.db, .id = id };
+        return .{ .info = pkg, .db = provider.db, .id = id };
     }
 
     pub fn resolve(self: *PackageResolver, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
@@ -398,6 +398,7 @@ const PackageResolver = struct {
 
     pub fn resolveAll(self: *PackageResolver, names: [][]const u8, constraints: ?[]?[]const u8) ![]package.Provider {
         const alloc = self.context.alloc;
+        const store_conn = try self.context.getStore();
 
         var providers: std.ArrayList(package.Provider) = .empty;
         errdefer {
@@ -406,7 +407,7 @@ const PackageResolver = struct {
         }
 
         for (names, 0..) |name, idx| {
-            const exists = if (try self.context.getStore().row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
+            const exists = if (try store_conn.row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
                 defer row.deinit();
                 break :blk true;
             } else false;
