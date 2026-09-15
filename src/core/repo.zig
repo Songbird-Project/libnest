@@ -435,5 +435,25 @@ pub const RepoDatabaseRegistry = struct {
 
     pub fn deinit(self: *RepoDatabaseRegistry, alloc: Allocator) void {
         for (self.databases) |*db| db.deinit(alloc);
+        alloc.free(self.databases);
+    }
+
+    pub fn add(self: *RepoDatabaseRegistry, context: Context, repo: Repo) !void {
+        const alloc = context.alloc;
+
+        var sorted: std.ArrayList(RepoDatabase) = .empty;
+        errdefer sorted.deinit(alloc);
+
+        try sorted.appendSlice(alloc, self.databases);
+        alloc.free(self.databases);
+
+        try sorted.append(alloc, try .init(context, repo));
+        std.mem.sort(RepoDatabase, sorted.items, {}, lessThanPriority);
+
+        self.databases = try sorted.toOwnedSlice(alloc);
+    }
+
+    pub fn sync(self: *RepoDatabaseRegistry, context: Context) !void {
+        for (self.databases) |*db| try db.sync(context);
     }
 };
