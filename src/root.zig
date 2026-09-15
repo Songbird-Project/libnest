@@ -3,7 +3,6 @@ const std = @import("std");
 pub const config = @import("config");
 
 pub const package = @import("core/package.zig");
-pub const sync = @import("core/sync.zig");
 pub const context = @import("core/context.zig");
 pub const repo = @import("core/repo.zig");
 
