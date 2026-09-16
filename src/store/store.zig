@@ -195,17 +195,15 @@ pub fn clean(context: Context) !CleanInfo {
         \\LEFT JOIN gen_entries g ON g.package_id = p.id
         \\WHERE g.package_id IS NULL
     , .{});
-    defer pkg_rows.deinit();
+    var stale_ids: std.ArrayList(i64) = .empty;
+    defer stale_ids.deinit(context.alloc);
+    while (pkg_rows.next()) |row| try stale_ids.append(context.alloc, row.int(0));
+    pkg_rows.deinit();
 
     var removed_packages: usize = 0;
-    while (pkg_rows.next()) |row| {
-        try store_conn.execNoArgs("SAVEPOINT stale_package_rows");
-        errdefer store_conn.execNoArgs("ROLLBACK TO stale_package_rows") catch {};
-
-        try store_conn.exec("DELETE FROM packages WHERE id = ?1", .{row.int(0)});
+    for (stale_ids.items) |id| {
+        try store_conn.exec("DELETE FROM packages WHERE id = ?1", .{id});
         removed_packages += 1;
-
-        try store_conn.execNoArgs("RELEASE stale_package_rows");
     }
 
     var live: std.AutoHashMap([32]u8, void) = .init(context.alloc);

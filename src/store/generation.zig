@@ -36,7 +36,7 @@ pub fn getNumber(context: Context, gen_id: i64) !struct { profile: i64, number: 
 pub fn getCurrent(context: Context, profile_id: i64) !i64 {
     const store_conn = try context.getStore();
     const gen_row = try store_conn.row(
-        "SELECT generation FROM profiles WHERE id = ?1",
+        "SELECT generation FROM profiles WHERE id = ?1 AND generation IS NOT NULL",
         .{profile_id},
     );
     if (gen_row == null) return error.NoGenerations;
@@ -171,6 +171,7 @@ pub fn build(
                 var hash: [32]u8 = undefined;
                 @memcpy(&hash, str_blob);
                 const blob_path = try store.objectPath(context, hash);
+                defer context.alloc.free(blob_path);
                 try Io.Dir.cwd().symLink(context.io, blob_path, dest, .{});
             }
         }
@@ -213,10 +214,9 @@ pub fn activate(context: Context, gen_id: i64) !void {
         error.FileNotFound => {},
         else => return err,
     };
-
-    try store_conn.exec("UPDATE profiles SET generation = ?1 WHERE id = ?2", .{ gen.number, gen.profile });
     try Io.Dir.cwd().symLink(context.io, gen_dir, tmp, .{ .is_directory = true });
     try Io.Dir.cwd().rename(tmp, .cwd(), current, context.io);
+    try store_conn.exec("UPDATE profiles SET generation = ?1 WHERE id = ?2", .{ gen.number, gen.profile });
 }
 
 pub fn protect(context: Context, gen_id: i64, protected: bool) !void {
@@ -245,12 +245,9 @@ pub fn protect(context: Context, gen_id: i64, protected: bool) !void {
 
 pub fn purgeUnsafe(context: Context, gen_id: i64) !void {
     const store_conn = try context.getStore();
-
     const gen = try getNumber(context, gen_id);
     const profile_name = try profile.getName(context, gen.profile);
     defer context.alloc.free(profile_name);
-
-    try store_conn.exec("DELETE FROM generations WHERE id = ?1", .{gen_id});
 
     var num_buf: [32]u8 = undefined;
     const str_gen = try std.fmt.bufPrint(&num_buf, "{d}", .{gen.number});
@@ -264,6 +261,7 @@ pub fn purgeUnsafe(context: Context, gen_id: i64) !void {
     defer context.alloc.free(gen_dir);
 
     try Io.Dir.cwd().deleteTree(context.io, gen_dir);
+    try store_conn.exec("DELETE FROM generations WHERE id = ?1", .{gen_id});
 }
 
 pub fn purge(context: Context, gen_id: i64) !void {
@@ -299,38 +297,36 @@ pub fn purge(context: Context, gen_id: i64) !void {
 /// Skips the current, previous and any protected generations
 pub fn purgeAll(context: Context, profile_id: i64, older_than: u32) !void {
     const store_conn = try context.getStore();
-
     const current_gen = try getCurrent(context, profile_id);
     const profile_name = try profile.getName(context, profile_id);
     defer context.alloc.free(profile_name);
 
-    var gens = try store_conn.rows(
-        "SELECT id,number,protected FROM generations WHERE profile_id = ?1 ORDER BY number DESC",
-        .{profile_id},
-    );
-    defer gens.deinit();
+    const Gen = struct { id: i64, number: i64, protected: bool };
+    var gens: std.ArrayList(Gen) = .empty;
+    defer gens.deinit(context.alloc);
+    {
+        var gen_rows = try store_conn.rows(
+            "SELECT id,number,protected FROM generations WHERE profile_id = ?1 ORDER BY number DESC",
+            .{profile_id},
+        );
+        defer gen_rows.deinit();
+        while (gen_rows.next()) |gen| try gen_rows.append(context.alloc, .{
+            .id = gen.int(0),
+            .number = gen.int(1),
+            .protected = gen.int(2) != 0,
+        });
+    }
 
-    try store_conn.transaction();
-    errdefer store_conn.rollback();
-
-    while (gens.next()) |gen| {
-        const gen_id = gen.int(0);
-        const gen_num = gen.int(1);
-        const protected = gen.int(2) != 0;
-
-        if (protected or gen_num == current_gen or gen_num == current_gen - 1) {
-            if (gen_num < older_than) try context.log(
+    for (gens.items) |gen| {
+        if (gen.protected or gen.number == current_gen or gen.number == current_gen - 1) {
+            if (gen.number < older_than) try context.log(
                 .Info,
                 "Generation {d} in '{s}' is protected, skipping...\n",
-                .{ gen_num, profile_name },
+                .{ gen.number, profile_name },
             );
             continue;
         }
-
-        if (gen_num <= older_than) continue;
-
-        try purgeUnsafe(context, gen_id);
+        if (gen.number <= older_than) continue;
+        try purgeUnsafe(context, gen.id);
     }
-
-    try store_conn.commit();
 }
