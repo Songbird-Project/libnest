@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const package = @import("../core/package.zig");
 const Context = @import("../core/context.zig").Context;
 const ver = @import("../utils/version.zig");
@@ -36,7 +37,7 @@ pub const Field = enum {
     }
 };
 
-pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !package.PackageInfo {
+pub fn parse(alloc: Allocator, repo: []const u8, src: []const u8) !package.PackageInfo {
     var pkg = package.PackageInfo{
         .name = &.{},
         .repo = repo,
@@ -85,7 +86,7 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
         switch (field) {
             .name => pkg.name = trimmed,
             .version => {
-                const evr = ver.parseEVR(trimmed);
+                const evr = ver.parseEvr(trimmed);
                 pkg.epoch = try std.fmt.parseUnsigned(u32, evr.epoch, 10);
                 pkg.version = evr.version;
                 pkg.release = if (evr.release) |r| r else null;
@@ -138,4 +139,12 @@ pub fn parse(alloc: std.mem.Allocator, repo: []const u8, src: []const u8) !packa
     pkg.deps = try deps.toOwnedSlice(alloc);
 
     return pkg;
+}
+
+pub fn clearBackingArrays(alloc: Allocator, pkg: *package.PackageInfo) void {
+    alloc.free(pkg.licenses);
+    alloc.free(pkg.replaces);
+    alloc.free(pkg.conflicts);
+    alloc.free(pkg.provides);
+    alloc.free(pkg.deps);
 }
