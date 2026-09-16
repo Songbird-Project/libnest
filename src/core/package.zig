@@ -71,7 +71,7 @@ pub const Constrained = struct {
 
         return .{
             .name = try alloc.dupe(u8, constrained.name),
-            .constraint = try alloc.dupe(u8, constrained.constraint),
+            .constraint = if (constrained.constraint) |c| try alloc.dupe(u8, c) orelse null,
         };
     }
 
@@ -96,7 +96,7 @@ pub const Dependency = struct {
         return .{
             .kind = kind,
             .name = try alloc.dupe(u8, constrained.name),
-            .constraint = try alloc.dupe(u8, constrained.constraint),
+            .constraint = if (constrained.constraint) |c| try alloc.dupe(u8, c) orelse null,
         };
     }
 
