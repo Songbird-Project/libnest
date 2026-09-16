@@ -43,17 +43,19 @@ pub const CurlClient = struct {
         const c_url = try context.alloc.dupeSentinel(u8, url, 0);
         defer context.alloc.free(c_url);
 
-        const tmp = try Io.Dir.path.join(context.alloc, &.{
+        const tmp_path = try Io.Dir.path.join(context.alloc, &.{
             Io.Dir.path.dirname(dest) orelse "",
             ".tmp",
             Io.Dir.path.basename(dest),
         });
-        try Io.Dir.cwd().createDirPath(context.io, Io.Dir.path.dirname(tmp).?);
+        try Io.Dir.cwd().createDirPath(context.io, Io.Dir.path.dirname(tmp_path).?);
 
-        const out = try std.Io.Dir.cwd().createFile(context.io, tmp, .{});
-        defer out.close(context.io);
-        var out_buf: [8192]u8 = undefined;
-        var writer = out.writer(context.io, &out_buf);
+        const tmp_file = try Io.Dir.cwd().createFile(context.io, tmp_path, .{});
+        defer tmp_file.close(context.io);
+        errdefer Io.Dir.cwd().deleteFile(context.io, tmp_path);
+
+        var tmp_buf: [8192]u8 = undefined;
+        var writer = tmp_file.writer(context.io, &tmp_buf);
         const file_writer = &writer.interface;
 
         try self.easy.setMethod(.GET);
@@ -69,7 +71,7 @@ pub const CurlClient = struct {
             return error.DownloadFailed;
         }
 
-        try Io.Dir.cwd().rename(tmp, .cwd(), dest, context.io);
+        try Io.Dir.cwd().rename(tmp_file, .cwd(), dest, context.io);
     }
 
     pub fn downloadFromMirror(
