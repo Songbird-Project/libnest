@@ -10,7 +10,7 @@ const zqlite = @import("zqlite");
 
 pub const MirrorFormatterOpts = struct {
     sentinel: ?u8 = null,
-    formatters: []struct { key: []const u8, value: anyopaque },
+    formatters: []struct { key: []const u8, value: []const u8 },
 };
 
 pub fn mirrorUrl(
@@ -27,20 +27,44 @@ pub fn mirrorUrl(
     while (std.mem.findScalar(u8, remaining, '$')) |idx| {
         try writer.writeAll(remaining[0..idx]);
 
+        var matched = false;
         inline for (format_opts.formatters) |formatter| {
             if (std.mem.startsWith(u8, remaining, "$" ++ formatter.key)) {
-                try writer.print("{}", .{formatter.value});
-                remaining = remaining["$" ++ formatter.key.len ..];
-            } else {
-                try writer.writeByte('$');
-                remaining = remaining[idx + 1 ..];
+                try writer.print("{s}", .{formatter.value});
+                remaining = remaining[1 + formatter.key.len ..];
+                matched = true;
             }
+        }
+
+        if (!matched) {
+            try writer.writeByte('$');
+            remaining = remaining[1..];
         }
     }
 
     try writer.print("{s}/{s}", .{ remaining, filename });
 
     return try if (format_opts.sentinel) |s| resolved.toOwnedSliceSentinel(s) else resolved.toOwnedSlice();
+}
+
+pub fn packageFilename(ctx: Context, pkg: package.PackageInfo) ![]const u8 {
+    const ver = try if (pkg.epoch != 0)
+        std.fmt.allocPrint(ctx.alloc, "{d}:{s}", .{ pkg.epoch, pkg.version })
+    else
+        std.fmt.allocPrint(ctx.alloc, "{s}", .{pkg.version});
+    defer ctx.alloc.free(ver);
+
+    const full_ver = try if (pkg.release) |rel|
+        std.fmt.allocPrint(ctx.alloc, "{s}-{s}", .{ ver, rel })
+    else
+        std.fmt.allocPrint(ctx.alloc, "{s}", .{ver});
+    defer ctx.alloc.free(full_ver);
+
+    return std.fmt.allocPrint(ctx.alloc, "{s}-{s}-{s}.pkg.tar.zst", .{
+        pkg.name,
+        full_ver,
+        pkg.arch,
+    });
 }
 
 const comps: std.StaticStringMap(u8) = .initComptime(.{

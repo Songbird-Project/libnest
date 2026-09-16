@@ -1,12 +1,13 @@
 const std = @import("std");
 const Io = std.Io;
 const download = @import("../net/download.zig");
-const Context = @import("context.zig").Context;
+const Context = @import("../core/context.zig").Context;
 const zqlite = @import("zqlite");
 const archive = @import("../utils/archive.zig");
 const package = @import("../core/package.zig");
 const ingest = @import("../store/ingest.zig");
 const sqlite = @import("../utils/sqlite.zig");
+const resolve = @import("../core/resolve.zig");
 
 const RelationStmts = struct {
     package: zqlite.Stmt,
@@ -104,7 +105,7 @@ pub fn installPackage(
     const repo = provider.db.repo;
     const pkg = provider.info;
 
-    const pkg_filename = try resolvePkgFilename(context, pkg.*);
+    const pkg_filename = try resolve.packageFilename(context, pkg.*);
     defer context.alloc.free(pkg_filename);
     const dest = try Io.Dir.path.join(context.alloc, &.{
         context.path_options.root,
@@ -190,24 +191,4 @@ pub fn installPackage(
     try persistRelations(store_id, pkg.*, stmts);
 
     try store_conn.commit();
-}
-
-fn resolvePkgFilename(context: Context, pkg: package.PackageInfo) ![]const u8 {
-    const ver = try if (pkg.epoch != 0)
-        std.fmt.allocPrint(context.alloc, "{d}:{s}", .{ pkg.epoch, pkg.version })
-    else
-        std.fmt.allocPrint(context.alloc, "{s}", .{pkg.version});
-    defer context.alloc.free(ver);
-
-    const full_ver = try if (pkg.release) |rel|
-        std.fmt.allocPrint(context.alloc, "{s}-{s}", .{ ver, rel })
-    else
-        std.fmt.allocPrint(context.alloc, "{s}", .{ver});
-    defer context.alloc.free(full_ver);
-
-    return std.fmt.allocPrint(context.alloc, "{s}-{s}-{s}.pkg.tar.zst", .{
-        pkg.name,
-        full_ver,
-        pkg.arch,
-    });
 }
