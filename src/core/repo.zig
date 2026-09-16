@@ -7,6 +7,7 @@ const version = @import("../utils/version.zig");
 const download = @import("../net/download.zig");
 const archive = @import("../utils/archive.zig");
 const desc = @import("../parse/desc.zig");
+const sqlite = @import("../utils/sqlite.zig");
 
 pub const Repo = struct {
     name: []const u8,
@@ -57,7 +58,7 @@ const RepoDatabaseStmts = struct {
     pub fn init(context: Context, conn: zqlite.Conn) !RepoDatabaseStmts {
         var self: RepoDatabaseStmts = undefined;
         inline for (std.meta.fields(RepoDatabaseStmts)) |field| {
-            @field(self, field.name) = try prepare(context, conn, @field(sql, field.name));
+            @field(self, field.name) = try sqlite.prepare(context, conn, @field(sql, field.name));
         }
         return self;
     }
@@ -69,60 +70,27 @@ const RepoDatabaseStmts = struct {
     }
 };
 
-fn prepare(context: Context, conn: zqlite.Conn, sql: []const u8) !zqlite.Stmt {
-    return conn.prepare(sql) catch |err| {
-        try context.log(.Error, "Failed to prepare SQL statement: {s}\n", .{conn.lastError()});
-        return err;
-    };
-}
-
-fn bindAndExec(stmt: zqlite.Stmt, values: anytype) !void {
-    try stmt.bind(values);
-    try stmt.stepToCompletion();
-    try stmt.reset();
-}
-
 fn persistRelations(
     id: i64,
     pkg_info: package.PackageInfo,
     stmts: RepoDatabaseStmts,
 ) !void {
-    try bindAndExec(stmts.del_deps, .{id});
-    try bindAndExec(stmts.del_provs, .{id});
-    try bindAndExec(stmts.del_confs, .{id});
-    try bindAndExec(stmts.del_reps, .{id});
-    try bindAndExec(stmts.del_lics, .{id});
+    try sqlite.bindAndExec(stmts.del_deps, .{id});
+    try sqlite.bindAndExec(stmts.del_provs, .{id});
+    try sqlite.bindAndExec(stmts.del_confs, .{id});
+    try sqlite.bindAndExec(stmts.del_reps, .{id});
+    try sqlite.bindAndExec(stmts.del_lics, .{id});
 
     for (pkg_info.deps) |dep|
-        try bindAndExec(stmts.ins_deps, .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
+        try sqlite.bindAndExec(stmts.ins_deps, .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
     for (pkg_info.provides) |provide|
-        try bindAndExec(stmts.ins_provs, .{ id, provide.name, provide.constraint });
+        try sqlite.bindAndExec(stmts.ins_provs, .{ id, provide.name, provide.constraint });
     for (pkg_info.conflicts) |confs|
-        try bindAndExec(stmts.ins_confs, .{ id, confs.name, confs.constraint });
+        try sqlite.bindAndExec(stmts.ins_confs, .{ id, confs.name, confs.constraint });
     for (pkg_info.replaces) |reps|
-        try bindAndExec(stmts.ins_reps, .{ id, reps.name, reps.constraint });
+        try sqlite.bindAndExec(stmts.ins_reps, .{ id, reps.name, reps.constraint });
     for (pkg_info.licenses) |license|
-        try bindAndExec(stmts.ins_lics, .{ id, license });
-}
-
-fn resolvePkgFilename(ctx: Context, pkg: package.PackageInfo) ![]const u8 {
-    const ver = try if (pkg.epoch != 0)
-        std.fmt.allocPrint(ctx.alloc, "{d}:{s}", .{ pkg.epoch, pkg.version })
-    else
-        std.fmt.allocPrint(ctx.alloc, "{s}", .{pkg.version});
-    defer ctx.alloc.free(ver);
-
-    const full_ver = try if (pkg.release) |rel|
-        std.fmt.allocPrint(ctx.alloc, "{s}-{s}", .{ ver, rel })
-    else
-        std.fmt.allocPrint(ctx.alloc, "{s}", .{ver});
-    defer ctx.alloc.free(full_ver);
-
-    return std.fmt.allocPrint(ctx.alloc, "{s}-{s}-{s}.pkg.tar.zst", .{
-        pkg.name,
-        full_ver,
-        pkg.arch,
-    });
+        try sqlite.bindAndExec(stmts.ins_lics, .{ id, license });
 }
 
 pub const RepoDatabase = struct {
@@ -264,29 +232,24 @@ pub const RepoDatabase = struct {
 
     fn syncPackageInfo(
         self: *RepoDatabase,
+        alloc: Allocator,
+        parser_arena: *std.heap.ArenaAllocator,
+        read_buffer: []u8,
+        contents: *std.ArrayList(u8),
         reader: *archive.Reader,
         entry: *archive.c.archive_entry,
-        memory: struct {
-            alloc: Allocator,
-            parser_arena: *std.heap.ArenaAllocator,
-            read_buffer: []u8,
-            contents: *std.ArrayList(u8),
-        },
     ) !void {
         const path: []const u8 = std.mem.span(archive.c.archive_entry_pathname(entry));
         if (!std.mem.eql(u8, std.Io.Dir.path.basename(path), "desc")) return;
 
         while (true) {
-            const read = try reader.readData(memory.read_buffer);
+            const read = try reader.readData(read_buffer);
             if (read <= 0) break;
-            try memory.contents.appendSlice(memory.alloc, memory.read_buffer[0..read]);
+            try contents.appendSlice(alloc, read_buffer[0..read]);
         }
 
-        const pkg_info = try desc.parse(
-            memory.parser_arena.allocator(),
-            self.repo.name,
-            memory.contents.items,
-        );
+        var pkg_info = try desc.parse(parser_arena.allocator(), self.repo.name, contents.items);
+        defer desc.clearBackingArrays(alloc, &pkg_info);
 
         if (!std.mem.eql(u8, pkg_info.arch, self.repo.arch) and
             !std.mem.eql(u8, pkg_info.arch, "any")) return;
