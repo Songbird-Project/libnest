@@ -108,6 +108,13 @@ fn rpmvercmp(a: []const u8, b: []const u8) i8 {
     }
 }
 
+pub fn formatEvr(alloc: std.mem.Allocator, epoch: u32, ver: []const u8, release: ?[]const u8) ![]u8 {
+    return if (release) |r|
+        std.fmt.allocPrint(alloc, "{d}:{s}-{s}", .{ epoch, ver, r })
+    else
+        std.fmt.allocPrint(alloc, "{d}:{s}", .{ epoch, ver });
+}
+
 /// Return:
 ///  -1: a < b
 ///   0: a = b

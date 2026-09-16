@@ -96,13 +96,6 @@ fn stripOperator(s: []const u8) []const u8 {
     return s;
 }
 
-fn formatEVR(alloc: std.mem.Allocator, epoch: u32, ver: []const u8, release: ?[]const u8) ![]u8 {
-    return if (release) |r|
-        std.fmt.allocPrint(alloc, "{d}:{s}-{s}", .{ epoch, ver, r })
-    else
-        std.fmt.allocPrint(alloc, "{d}:{s}", .{ epoch, ver });
-}
-
 fn satisfiesConstraint(local: []const u8, constraint: []const u8) !bool {
     var comp: u8 = undefined;
     var op_len: u8 = undefined;
@@ -361,7 +354,7 @@ const PackageResolver = struct {
             const local = if (provider.version) |pv|
                 stripOperator(pv)
             else
-                try formatEVR(alloc, pkg.epoch, pkg.version, pkg.release);
+                try version.formatEvr(alloc, pkg.epoch, pkg.version, pkg.release);
             defer if (provider.version == null) alloc.free(local);
 
             if (!try satisfiesConstraint(local, c)) return error.ConflictingDependencies;
@@ -407,7 +400,7 @@ const PackageResolver = struct {
                 continue;
             }
 
-            const current_version = try formatEVR(alloc, current.info.epoch, current.info.version, current.info.release);
+            const current_version = try version.formatEvr(alloc, current.info.epoch, current.info.version, current.info.release);
             try self.seen.put(current.id, current_version);
             try providers.append(alloc, current);
 
@@ -431,13 +424,26 @@ const PackageResolver = struct {
         }
 
         for (names, 0..) |name, idx| {
-            const exists = if (try store_conn.row("SELECT id FROM packages WHERE name = ?1", .{name})) |row| blk: {
-                defer row.deinit();
-                break :blk true;
-            } else false;
-            if (exists) continue;
-
             const constraint = if (constraints) |c| c[idx] else null;
+            const satisfied = blk: {
+                const row = try store_conn.row("SELECT epoch, version, release FROM packages WHERE name = ?1", .{name});
+                if (row == null) break :blk false;
+                defer row.?.deinit();
+
+                const c = constraint orelse break :blk true;
+
+                const local = try version.formatEvr(
+                    alloc,
+                    @intCast(row.?.int(0)),
+                    row.?.cString(1),
+                    row.?.nullableCString(2),
+                );
+                defer alloc.free(local);
+
+                break :blk satisfiesConstraint(local, c);
+            };
+            if (satisfied) continue;
+
             const resolved = try self.resolve(name, constraint);
             defer alloc.free(resolved);
 
