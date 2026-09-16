@@ -426,21 +426,25 @@ const PackageResolver = struct {
         for (names, 0..) |name, idx| {
             const constraint = if (constraints) |c| c[idx] else null;
             const satisfied = blk: {
-                const row = try store_conn.row("SELECT epoch, version, release FROM packages WHERE name = ?1", .{name});
-                if (row == null) break :blk false;
-                defer row.?.deinit();
+                const rows = try store_conn.rows("SELECT epoch, version, release FROM packages WHERE name = ?1", .{name});
+                defer rows.deinit();
 
-                const c = constraint orelse break :blk true;
+                var exist = false;
+                while (rows.next()) |row| {
+                    exist = true;
+                    const c = constraint orelse continue;
+                    const local = try version.formatEvr(
+                        alloc,
+                        @intCast(row.?.int(0)),
+                        row.?.cString(1),
+                        row.?.nullableCString(2),
+                    );
+                    defer alloc.free(local);
 
-                const local = try version.formatEvr(
-                    alloc,
-                    @intCast(row.?.int(0)),
-                    row.?.cString(1),
-                    row.?.nullableCString(2),
-                );
-                defer alloc.free(local);
+                    if (try satisfiesConstraint(local, c)) break :blk true;
+                }
 
-                break :blk satisfiesConstraint(local, c);
+                break :blk constraint == null and exist;
             };
             if (satisfied) continue;
 
