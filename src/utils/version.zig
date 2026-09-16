@@ -7,7 +7,7 @@ const EVR = struct {
     release: ?[]const u8,
 };
 
-pub fn parseEVR(evr: []const u8) EVR {
+pub fn parseEvr(evr: []const u8) EVR {
     var epoch: []const u8 = "0";
     var version: []const u8 = evr;
     var release: ?[]const u8 = null;
@@ -21,7 +21,7 @@ pub fn parseEVR(evr: []const u8) EVR {
     }
 
     if (s < evr.len and evr[s] == ':') {
-        epoch = evr[0..s];
+        epoch = if (s == 0) "0" else evr[0..s];
         version = evr[s + 1 ..];
     }
 
@@ -123,8 +123,8 @@ pub fn cmp(a: ?[]const u8, b: ?[]const u8) i8 {
 
     if (std.mem.eql(u8, a.?, b.?)) return 0;
 
-    const evr1 = parseEVR(a.?);
-    const evr2 = parseEVR(b.?);
+    const evr1 = parseEvr(a.?);
+    const evr2 = parseEvr(b.?);
 
     var ret: i8 = rpmvercmp(evr1.epoch, evr2.epoch);
     if (ret != 0) return ret;
