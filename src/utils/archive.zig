@@ -46,6 +46,7 @@ pub fn ingestFile(context: Context, reader: *Reader, path: []const u8, mode: u32
         try writer.writeAll(buf[0..bytes]);
         total_bytes += bytes;
     }
+    try writer.flush();
 
     var hash: [32]u8 = undefined;
     hasher.final(&hash);
