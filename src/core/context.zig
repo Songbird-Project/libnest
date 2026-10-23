@@ -20,9 +20,9 @@ pub const LogOptions = struct {
 pub const PathOptions = struct {
     root: []const u8 = "/",
     config: []const u8 = "etc/" ++ config.name,
-    cache: []const u8 = "var/cache/" ++ config.name,
-    state: []const u8 = "var/lib/" ++ config.name,
-    store: []const u8 = config.name ++ "/store",
+    cache: []const u8 = "etc/" ++ config.name ++ "/.cache",
+    db: []const u8 = "etc/" ++ config.name ++ "/.db",
+    store: []const u8 = "etc/" ++ config.name ++ "/.store",
 };
 
 pub const Context = struct {
@@ -35,7 +35,6 @@ pub const Context = struct {
     path_options: PathOptions = .{},
 
     log_cb: *const fn (Io, LogLevel, []const u8) anyerror!void = defaultLogCb,
-    select_cb: *const fn (Io, usize) anyerror!usize = defaultSelectCb,
 
     pub fn init(alloc: Allocator, io: Io) Context {
         return .{
@@ -75,10 +74,6 @@ pub const Context = struct {
 
         try self.log_cb(self.io, level, msg);
     }
-
-    pub fn select(self: Context, items: usize) !usize {
-        return try self.select_cb(self.io, items);
-    }
 };
 
 fn defaultLogCb(io: Io, level: LogLevel, msg: []const u8) !void {
@@ -92,40 +87,4 @@ fn defaultLogCb(io: Io, level: LogLevel, msg: []const u8) !void {
     const w = &writer.interface;
     try w.writeAll(msg);
     try w.flush();
-}
-
-fn defaultSelectCb(io: Io, items: usize) !usize {
-    if (items == 0) return 0;
-
-    var stdin_buf: [16]u8 = undefined;
-    const stdin_file = Io.File.stdin();
-
-    var stdin_reader = stdin_file.reader(io, &stdin_buf);
-    const stdin = &stdin_reader.interface;
-
-    var stdout_buf: [256]u8 = undefined;
-    const file = Io.File.stdout();
-    var writer = file.writer(io, &stdout_buf);
-    const w = &writer.interface;
-
-    var buf: [16]u8 = undefined;
-    var input = Io.Writer.fixed(&buf);
-
-    while (true) {
-        try w.print("Select [1-{d}]: ", .{items});
-        try w.flush();
-
-        input.end = 0;
-
-        _ = try stdin.streamDelimiter(&input, '\n');
-        const trimmed = std.mem.trim(u8, input.buffered(), " \t\r\n");
-
-        const val = std.fmt.parseInt(usize, trimmed, 10) catch {
-            _ = try stdin.discardRemaining();
-            continue;
-        };
-
-        if (val == 0 or val > items) continue;
-        return val - 1;
-    }
 }
