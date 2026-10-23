@@ -205,11 +205,57 @@ fn getNames(context: Context, conn: zqlite.Conn, comptime table: []const u8, id:
     return try list.toOwnedSlice(context.alloc);
 }
 
-const PackageResolver = struct {
+pub const PackageResolver = struct {
     context: Context,
     registry: RepoDatabaseRegistry,
     seen: std.AutoHashMap(i64, []const u8),
     selected: std.StringHashMap(i64),
+
+    const WorkItem = struct {
+        name: []const u8,
+        explicit: bool = false,
+        parent: ?[]const u8 = null,
+        constraint: ?[]const u8 = null,
+    };
+
+    pub const ProviderCandidate = struct {
+        name: []const u8,
+        repo: []const u8,
+        id: i64,
+
+        fn fromProvider(alloc: Allocator, items: []const PackageResolver.Provider) ![]ProviderCandidate {
+            var out = try alloc.alloc(ProviderCandidate, items.len);
+            for (items, 0..) |p, idx| out[idx] = .{
+                .name = try alloc.dupe(u8, p.name),
+                .repo = p.db.repo.name,
+                .id = p.id,
+            };
+            return out;
+        }
+
+        pub fn deinit(self: *ProviderCandidate, alloc: Allocator) void {
+            alloc.free(self.name);
+        }
+    };
+
+    pub const ProviderResult = union(enum) {
+        found: package.Provider,
+        ambiguous: struct { name: []const u8, parent: ?[]const u8, candidates: []ProviderCandidate },
+        unsatisfied: struct { name: []const u8, parent: ?[]const u8, constraint: ?[]const u8 },
+    };
+
+    const ResolveResult = union(enum) {
+        ok: []package.Provider,
+        ambiguous: @FieldType(ProviderResult, "ambiguous"),
+        unsatisfied: @FieldType(ProviderResult, "unsatisfied"),
+    };
+
+    const Provider = struct {
+        db: *RepoDatabase,
+        name: []const u8,
+        id: i64,
+        version: ?[]const u8 = null,
+    };
 
     pub fn init(context: Context, registry: RepoDatabaseRegistry) PackageResolver {
         const alloc = context.alloc;
@@ -234,20 +280,101 @@ const PackageResolver = struct {
         self.selected.deinit();
     }
 
+    pub fn checkProvider(
+        self: *PackageResolver,
+        provider: PackageResolver.Provider,
+        constraint: ?[]const u8,
+        explicit: bool,
+    ) !package.Provider {
+        const alloc = self.context.alloc;
+        var row = (try provider.db.conn.row("SELECT * FROM packages WHERE id = ?1", .{provider.id})).?;
+        defer row.deinit();
+        const conn = provider.db.conn;
+
+        const id = row.int(0);
+        const pkg = try alloc.create(package.PackageInfo);
+        errdefer alloc.destroy(pkg);
+
+        const blob = row.blob(3);
+        if (blob.len != 32) return error.InvalidHash;
+        var hash: [32]u8 = undefined;
+        @memcpy(&hash, blob);
+
+        pkg.* = .{
+            .name = try alloc.dupe(u8, row.cString(1)),
+            .arch = try alloc.dupe(u8, row.cString(2)),
+            .checksum = hash,
+            .repo = try alloc.dupe(u8, provider.db.repo.name),
+            .epoch = @intCast(row.int(4)),
+            .version = try alloc.dupe(u8, row.cString(5)),
+            .release = if (row.nullableCString(6)) |rel| try alloc.dupe(u8, rel) else null,
+            .explicit = explicit,
+        };
+        errdefer pkg.deinit(alloc);
+
+        if (constraint) |c| {
+            const local = if (provider.version) |pv|
+                stripOperator(pv)
+            else
+                try version.formatEvr(alloc, pkg.epoch, pkg.version, pkg.release);
+            defer if (provider.version == null) alloc.free(local);
+
+            if (!try satisfiesConstraint(local, c)) {
+                pkg.deinit(alloc);
+                return error.ConstraintFailed;
+            }
+        }
+
+        pkg.deps = try getDepends(self.context, conn, id);
+        pkg.provides = try getConstrainedRelation(self.context, conn, "provides", id);
+        pkg.conflicts = try getConstrainedRelation(self.context, conn, "conflicts", id);
+        pkg.replaces = try getConstrainedRelation(self.context, conn, "replaces", id);
+        pkg.licenses = try getNames(self.context, conn, "licenses", id);
+
+        return .{ .info = pkg, .db = provider.db, .id = id };
+    }
+
+    fn tryCandidates(
+        self: *PackageResolver,
+        candidates: []PackageResolver.Provider,
+        name: []const u8,
+        explicit: bool,
+        constraint: ?[]const u8,
+        parent: ?[]const u8,
+    ) !ProviderResult {
+        const alloc = self.context.alloc;
+        for (candidates) |candidate| {
+            const found = self.checkProvider(candidate, constraint, explicit) catch |err| switch (err) {
+                error.ConstraintFailed => continue,
+                else => return err,
+            };
+            try putSelected(alloc, &self.selected, name, candidate.id);
+            try putSelected(alloc, &self.selected, candidate.name, candidate.id);
+
+            var rows = try candidate.db.conn.rows(
+                "SELECT name FROM provides WHERE package_id = ?1",
+                .{candidate.id},
+            );
+            defer rows.deinit();
+            while (rows.next()) |row| try putSelected(alloc, &self.selected, row.cString(0), candidate.id);
+
+            return .{ .found = found };
+        }
+
+        return .{ .unsatisfied = .{ .name = name, .parent = parent, .constraint = constraint } };
+    }
+
     pub fn getProvider(
         self: *PackageResolver,
         name: []const u8,
         explicit: bool,
-        provider_constraint: ?[]const u8,
-    ) !package.Provider {
+        parent: ?[]const u8,
+        constraint: ?[]const u8,
+        worklist: []const WorkItem,
+    ) !ProviderResult {
         const alloc = self.context.alloc;
 
-        var providers: std.ArrayList(struct {
-            db: *RepoDatabase,
-            name: []const u8,
-            id: i64,
-            version: ?[]const u8 = null,
-        }) = .empty;
+        var providers: std.ArrayList(PackageResolver.Provider) = .empty;
         defer {
             for (providers.items) |item| {
                 alloc.free(item.name);
@@ -276,152 +403,75 @@ const PackageResolver = struct {
             }
         }
 
-        if (providers.items.len == 0) {
-            try self.context.log(.Error, "No providers found for '{s}'\n", .{name});
-            return error.ProviderNotFound;
-        }
+        if (providers.items.len == 0) return .{ .unsatisfied = .{
+            .name = name,
+            .parent = parent,
+            .constraint = constraint,
+        } };
 
-        const selected_id: ?i64 = if (self.selected.get(name)) |id| blk: {
-            for (providers.items) |p| {
-                if (p.id == id) break :blk id;
+        std.mem.sort(PackageResolver.Provider, providers.items, {}, struct {
+            fn lt(_: void, a: PackageResolver.Provider, b: PackageResolver.Provider) bool {
+                return a.db.repo.priority < b.db.repo.priority;
             }
-            break :blk null;
-        } else null;
-
-        const provider = if (selected_id) |id| blk: {
-            for (providers.items) |p| {
-                if (p.id == id) break :blk p;
-            }
-            return error.ProviderNotFound;
-        } else blk: {
-            const index = if (providers.items.len == 1) 0 else select: {
-                try self.context.log(
-                    .Info,
-                    "There are {d} providers for '{s}', select which one you would like to use:\n",
-                    .{ providers.items.len, name },
-                );
-
-                for (providers.items, 1..) |pkg, idx| {
-                    try self.context.log(.None, "{d:>3}: {s}\n", .{ idx, pkg.name });
-                }
-
-                break :select try self.context.select(providers.items.len);
-            };
-
-            const chosen = providers.items[index];
-
-            try putSelected(alloc, &self.selected, name, chosen.id);
-            try putSelected(alloc, &self.selected, chosen.name, chosen.id);
-
-            var rows = try chosen.db.conn.rows(
-                "SELECT name FROM provides WHERE package_id = ?1",
-                .{chosen.id},
-            );
-            defer rows.deinit();
-            while (rows.next()) |row| {
-                try putSelected(alloc, &self.selected, row.cString(0), chosen.id);
-            }
-
-            break :blk chosen;
-        };
-
-        var row = (try provider.db.conn.row("SELECT * FROM packages WHERE id = ?1", .{provider.id})).?;
-        defer row.deinit();
-        const conn = provider.db.conn;
-
-        const id = row.int(0);
-        const pkg = try alloc.create(package.PackageInfo);
-        errdefer alloc.destroy(pkg);
-
-        const blob = row.blob(3);
-        if (blob.len != 32) return error.InvalidHash;
-        var hash: [32]u8 = undefined;
-        @memcpy(&hash, blob);
-
-        pkg.* = .{
-            .name = try alloc.dupe(u8, row.cString(1)),
-            .arch = try alloc.dupe(u8, row.cString(2)),
-            .checksum = hash,
-            .repo = try alloc.dupe(u8, provider.db.repo.name),
-            .epoch = @intCast(row.int(4)),
-            .version = try alloc.dupe(u8, row.cString(5)),
-            .release = if (row.nullableCString(6)) |sum| try alloc.dupe(u8, sum) else null,
-            .explicit = explicit,
-        };
-        errdefer pkg.deinit(alloc);
-
-        if (provider_constraint) |c| {
-            const local = if (provider.version) |pv|
-                stripOperator(pv)
-            else
-                try version.formatEvr(alloc, pkg.epoch, pkg.version, pkg.release);
-            defer if (provider.version == null) alloc.free(local);
-
-            if (!try satisfiesConstraint(local, c)) return error.ConflictingDependencies;
-        }
-
-        pkg.deps = try getDepends(self.context, conn, id);
-        pkg.provides = try getConstrainedRelation(self.context, conn, "provides", id);
-        pkg.conflicts = try getConstrainedRelation(self.context, conn, "conflicts", id);
-        pkg.replaces = try getConstrainedRelation(self.context, conn, "replaces", id);
-        pkg.licenses = try getNames(self.context, conn, "licenses", id);
-
-        return .{ .info = pkg, .db = provider.db, .id = id };
-    }
-
-    pub fn resolve(self: *PackageResolver, name: []const u8, constraint: ?[]const u8) ![]package.Provider {
-        const alloc = self.context.alloc;
-
-        const WorkItem = struct {
-            name: []const u8,
-            first: bool = false,
-            constraint: ?[]const u8,
-        };
-
-        var worklist: std.ArrayList(WorkItem) = .empty;
-        defer worklist.deinit(alloc);
-
-        try self.context.log(.Info, "Resolving dependencies for '{s}'...\n", .{name});
-        try worklist.append(alloc, .{ .name = name, .first = true, .constraint = constraint });
-
-        var providers: std.ArrayList(package.Provider) = .empty;
-        errdefer {
-            for (providers.items) |provider| provider.deinit(alloc);
-            providers.deinit(alloc);
-        }
+        }.lt);
 
         var i: usize = 0;
-        while (i < worklist.items.len) : (i += 1) {
-            const item = worklist.items[i];
-            const current = try self.getProvider(item.name, item.first, item.constraint);
-
-            if (self.seen.get(current.id)) |_| {
-                current.deinit(alloc);
-                continue;
+        while (i < providers.items.len) {
+            var j = i + 1;
+            while (j < providers.items.len) {
+                if (std.mem.eql(u8, providers.items[i].name, providers.items[j].name)) {
+                    const dead = providers.orderedRemove(j);
+                    alloc.free(dead.name);
+                    if (dead.version) |v| alloc.free(v);
+                } else j += 1;
             }
-
-            const current_version = try version.formatEvr(alloc, current.info.epoch, current.info.version, current.info.release);
-            try self.seen.put(current.id, current_version);
-            try providers.append(alloc, current);
-
-            for (current.info.deps) |dep| {
-                if (dep.kind != .Run) continue;
-                try worklist.append(alloc, .{ .name = dep.name, .constraint = dep.constraint });
-            }
+            i += 1;
         }
 
-        return try providers.toOwnedSlice(alloc);
+        for (providers.items) |p| if (std.mem.eql(u8, p.name, name)) return try self.tryCandidates(
+            &.{p},
+            name,
+            explicit,
+            constraint,
+            parent,
+        );
+
+        var explicits: std.ArrayList(PackageResolver.Provider) = .empty;
+        defer explicits.deinit(alloc);
+        for (providers.items) |p| {
+            const is_explicit = self.selected.contains(p.name) or blk: {
+                for (worklist) |item| if (item.explicit and std.mem.eql(u8, item.name, p.name)) break :blk true;
+                break :blk false;
+            };
+            if (is_explicit) try explicits.append(alloc, p);
+        }
+
+        if (explicits.items.len > 0) return try self.tryCandidates(explicits.items, name, explicit, constraint, parent);
+        if (providers.items.len == 1) return try self.tryCandidates(providers.items, name, explicit, constraint, parent);
+
+        return .{ .ambiguous = .{
+            .name = name,
+            .parent = parent,
+            .candidates = try ProviderCandidate.fromProvider(alloc, providers.items),
+        } };
     }
 
-    pub fn resolveAll(self: *PackageResolver, names: [][]const u8, constraints: ?[]?[]const u8) ![]package.Provider {
+    pub fn resolve(self: *PackageResolver, names: [][]const u8, constraints: ?[]?[]const u8) !ResolveResult {
         const alloc = self.context.alloc;
         const store_conn = try self.context.getStore();
 
-        var providers: std.ArrayList(package.Provider) = .empty;
-        errdefer {
-            for (providers.items) |provider| provider.deinit(alloc);
-            providers.deinit(alloc);
+        defer {
+            var sel_it = self.selected.keyIterator();
+            while (sel_it.next()) |key| alloc.free(key.*);
+            self.selected.clearRetainingCapacity();
+
+            var seen_it = self.seen.valueIterator();
+            while (seen_it.next()) |val| alloc.free(val.*);
+            self.seen.clearRetainingCapacity();
         }
+
+        var worklist: std.ArrayList(WorkItem) = .empty;
+        defer worklist.deinit(alloc);
 
         for (names, 0..) |name, idx| {
             const constraint = if (constraints) |c| c[idx] else null;
@@ -435,9 +485,9 @@ const PackageResolver = struct {
                     const c = constraint orelse continue;
                     const local = try version.formatEvr(
                         alloc,
-                        @intCast(row.?.int(0)),
-                        row.?.cString(1),
-                        row.?.nullableCString(2),
+                        @intCast(row.int(0)),
+                        row.cString(1),
+                        row.nullableCString(2),
                     );
                     defer alloc.free(local);
 
@@ -448,12 +498,62 @@ const PackageResolver = struct {
             };
             if (satisfied) continue;
 
-            const resolved = try self.resolve(name, constraint);
-            defer alloc.free(resolved);
-
-            try providers.appendSlice(alloc, resolved);
+            try worklist.append(alloc, .{ .name = name, .explicit = true, .constraint = constraint });
         }
 
-        return try providers.toOwnedSlice(alloc);
+        var providers: std.ArrayList(package.Provider) = .empty;
+        errdefer {
+            for (providers.items) |provider| provider.deinit(alloc);
+            providers.deinit(alloc);
+        }
+
+        var i: usize = 0;
+        while (i < worklist.items.len) : (i += 1) {
+            const item = worklist.items[i];
+
+            switch (try self.getProvider(
+                item.name,
+                item.explicit,
+                item.parent,
+                item.constraint,
+                worklist.items,
+            )) {
+                .ambiguous => |a| {
+                    for (providers.items) |p| p.deinit(alloc);
+                    providers.clearAndFree(alloc);
+                    return .{ .ambiguous = a };
+                },
+                .unsatisfied => |u| {
+                    for (providers.items) |p| p.deinit(alloc);
+                    providers.clearAndFree(alloc);
+                    return .{ .unsatisfied = u };
+                },
+                .found => |current| {
+                    if (self.seen.get(current.id)) |_| {
+                        current.deinit(alloc);
+                        continue;
+                    }
+                    const current_version = try version.formatEvr(
+                        alloc,
+                        current.info.epoch,
+                        current.info.version,
+                        current.info.release,
+                    );
+
+                    try self.seen.put(current.id, current_version);
+                    try providers.append(alloc, current);
+                    for (current.info.deps) |dep| {
+                        if (dep.kind != .Run) continue;
+                        try worklist.append(alloc, .{
+                            .name = dep.name,
+                            .constraint = dep.constraint,
+                            .parent = current.info.name,
+                        });
+                    }
+                },
+            }
+        }
+
+        return .{ .ok = try providers.toOwnedSlice(alloc) };
     }
 };
