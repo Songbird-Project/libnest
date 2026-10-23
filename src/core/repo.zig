@@ -108,7 +108,7 @@ pub const RepoDatabase = struct {
         defer context.alloc.free(name);
         const path = try std.Io.Dir.path.joinZ(context.alloc, &.{
             context.path_options.root,
-            context.path_options.state,
+            context.path_options.db,
             name,
         });
         defer context.alloc.free(path);

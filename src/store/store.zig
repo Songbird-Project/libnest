@@ -42,7 +42,7 @@ const StoreObject = struct {
 pub fn open(context: Context) !StoreConn {
     const path = try std.Io.Dir.path.joinZ(context.alloc, &.{
         context.path_options.root,
-        context.path_options.state,
+        context.path_options.db,
         "system.db",
     });
     defer context.alloc.free(path);
