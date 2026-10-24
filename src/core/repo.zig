@@ -416,7 +416,19 @@ pub const RepoDatabaseRegistry = struct {
         self.databases = try sorted.toOwnedSlice(alloc);
     }
 
-    pub fn sync(self: *RepoDatabaseRegistry, context: Context) !void {
-        for (self.databases) |*db| try db.sync(context);
+    pub fn sync(self: *RepoDatabaseRegistry, context: Context, sync_only: []const []const u8) !void {
+        for (self.databases) |*db| {
+            if (sync_only.len > 0) {
+                var skip = true;
+                for (sync_only) |r| {
+                    if (std.mem.eql(u8, r, db.repo.name)) {
+                        skip = false;
+                        break;
+                    }
+                }
+                if (skip) continue;
+            }
+            db.sync(context);
+        }
     }
 };
