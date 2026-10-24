@@ -25,6 +25,7 @@ pub const PathOptions = struct {
     store: []const u8 = "etc/" ++ config.name ++ "/.store",
 };
 
+pub const LogFn = *const fn (?*anyopaque, Io, LogLevel, []const u8) anyerror!void;
 pub const Context = struct {
     io: Io,
     alloc: std.mem.Allocator,
@@ -34,7 +35,8 @@ pub const Context = struct {
     log_options: LogOptions = .{},
     path_options: PathOptions = .{},
 
-    log_cb: *const fn (Io, LogLevel, []const u8) anyerror!void = defaultLogCb,
+    log_cb: ?LogFn = defaultLogCb,
+    log_userdata: ?*anyopaque = null,
 
     pub fn init(alloc: Allocator, io: Io) Context {
         return .{
@@ -72,11 +74,11 @@ pub const Context = struct {
         const msg = try std.fmt.allocPrint(self.alloc, "{s}" ++ fmt, .{prefix} ++ args);
         defer self.alloc.free(msg);
 
-        try self.log_cb(self.io, level, msg);
+        if (self.log_cb) |cb| try cb(self.log_userdata, self.io, level, msg);
     }
 };
 
-fn defaultLogCb(io: Io, level: LogLevel, msg: []const u8) !void {
+pub fn defaultLogCb(_: ?*anyopaque, io: Io, level: LogLevel, msg: []const u8) !void {
     var buf: [256]u8 = undefined;
     const file = switch (level) {
         .Fatal, .Error, .Warn => Io.File.stderr(),
