@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025-2026 Songbird Project
+//
+// SPDX-License-Identifier: BSD-3-Clause-Attribution
+
 const std = @import("std");
 const Io = std.Io;
 const package = @import("../core/package.zig");
