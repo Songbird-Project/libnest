@@ -73,7 +73,7 @@ fn persistRelations(
     try sqlite.bindAndExec(stmts.del_lics, .{id});
 
     for (pkg_info.deps) |dep|
-        try sqlite.bindAndExec(stmts.ins_deps, .{ id, dep.name, @intFromEnum(dep.kind), dep.constraint });
+        try sqlite.bindAndExec(stmts.ins_deps, .{ id, dep.name, @backingInt(dep.kind), dep.constraint });
     for (pkg_info.provides) |provide|
         try sqlite.bindAndExec(stmts.ins_provs, .{ id, provide.name, provide.constraint });
     for (pkg_info.conflicts) |confs|

@@ -9,16 +9,20 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .curl = .{
-            .url = "git+https://github.com/jiacai2050/zig-curl.git?ref=v0.5.0#1ac5ec3d10afa1c4591464ed24550e3874ce865c",
-            .hash = "curl-0.5.0-P4tT4e_-AABZBa1zBmiSKFQo7xV0DJ2cUxFfH4KiQKj2",
+            .url = "git+https://github.com/jiacai2050/zig-curl.git?ref=v0.6.0#0bc73f43cbd736fb7801b31b91c2ea0cca145c67",
+            .hash = "curl-0.6.0-P4tT4ffzAgB1AzmYo7Rt92sP2w3GKcSvr36ISpuJ43sL",
         },
         .ini = .{
             .url = "git+https://github.com/ziglibs/ini#10cfba648f709588ab2f8785f56641024c510df9",
             .hash = "ini-0.1.0-YCQ9YnsrAAAxl1kQHi95ths2vSkdPIJxzUg6e2Oo83w_",
         },
         .zqlite = .{
-            .url = "git+https://github.com/karlseguin/zqlite.zig?ref=master#5ac4cabe95a6d7faa7baf0da8057a8e6e8a227a1",
-            .hash = "zqlite-0.0.1-RWLaY64xnAAxsD2YNT8QqPMJUuaFv2GOzFRR4aGypJv3",
+            .url = "git+https://github.com/karlseguin/zqlite.zig?ref=master#865223b734a5113f731ab1eb1d7d81c8ac252913",
+            .hash = "zqlite-0.0.1-RWLaY4Y8nADz2l5aBE-JVyDyM3sZzHjq0agNykuVZKqQ",
+        },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c?ref=2.0.2#c11030012dc325d446474d17b78c242fd1d622ec",
+            .hash = "translate_c-2.0.2-Q_BUWvBNBwBgPKQJPblip6M7AHNK_IPNPmyv4rSIQMQc",
         },
     },
     .paths = .{

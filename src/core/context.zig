@@ -64,7 +64,7 @@ pub const Context = struct {
         args: anytype,
     ) !void {
         if (!self.log_options.enabled) return;
-        if (@intFromEnum(level) < @intFromEnum(self.log_options.minimum_log_level)) return;
+        if (@backingInt(level) < @backingInt(self.log_options.minimum_log_level)) return;
 
         const prefix = switch (level) {
             .None => "",

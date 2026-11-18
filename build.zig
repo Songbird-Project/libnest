@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -15,12 +16,15 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "name", name);
 
-    const archive_c = b.addTranslateC(.{
-        .root_source_file = b.path("lib/archive.h"),
+    const translate_c = b.dependency("translate_c", .{});
+    const archive_c: Translator = .init(translate_c, .{
+        .c_source_file = b.path("lib/archive.h"),
         .target = target,
         .optimize = optimize,
+        .link_system_libs = &.{
+            .{ .name = "archive" },
+        },
     });
-    archive_c.linkSystemLibrary("archive", .{});
 
     const curl = b.dependency("curl", .{
         .target = target,
@@ -44,7 +48,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{
                 .name = "archive_c",
-                .module = archive_c.createModule(),
+                .module = archive_c.mod,
             },
         },
     });
